@@ -1,0 +1,119 @@
+//@version=5
+// ============================================================================
+// 放量突破 v5 · 風險定額 · 多空雙向 · 可實盤掛單(webhook)— Claude
+// ----------------------------------------------------------------------------
+// 倉位法:風險先固定(當前權益的 riskPct%),倉位 = 風險額 ÷ 停損距離。
+//         槓桿是「算出來的結果」,資金滾大時倉位等比例放大(複利內建)。
+// 停損:  多單=前一根低點,空單=前一根高點(進場初始停損);
+//         進場後改用 ATR 吊燈移動停利,給趨勢呼吸空間。
+// 實盤:  每個進場/出場帶 alert_message(JSON),設一條策略 alert、
+//         訊息框填 {{strategy.order.alert_message}}、貼上交易所/中繼 webhook URL。
+// ============================================================================
+strategy("放量突破 v5 · 實盤版 — Claude", overlay=true,
+     initial_capital=10000000, default_qty_type=strategy.fixed,
+     commission_type=strategy.commission.percent, commission_value=0.055,
+     pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ── 策略參數 ──
+boxLen   = input.int(20,    "突破箱型長度",        group="策略")
+rvolLen  = input.int(20,    "量能均長",            group="策略")
+rvolMin  = input.float(1.3, "放量門檻 RVOL≥",      group="策略")
+emaLen   = input.int(200,   "趨勢濾網 EMA",        group="策略")
+atrLen   = input.int(14,    "ATR 長度",            group="策略")
+atrBuf   = input.float(0.25,"突破緩衝 ×ATR",       group="策略")
+atrTrail = input.float(3.5, "吊燈移動停利 ×ATR",   group="策略")
+useLong  = input.bool(true, "做多",                group="策略")
+useShort = input.bool(true, "做空(空頭保險)",     group="策略")
+
+// ── 倉位 / 風險控管 ──
+riskPct  = input.float(5,   "每筆風險 = 當前權益的 %", group="風險控管",
+     tooltip="權益1000萬、停損距離3%→開倉1666萬(1.67x),打到停損虧50萬=5%。資金滾大自動放大倉位。")
+levCap   = input.float(5,   "槓桿上限(保險絲,倍)",  group="風險控管")
+minStopP = input.float(0.5, "停損距離下限 %(防過緊→爆倉)", group="風險控管") / 100.0
+
+// ── 實盤 Webhook ──
+liveOn   = input.bool(false, "啟用實盤下單訊息",   group="實盤 Webhook",
+     tooltip="打開後才會把下單量寫進 alert。回測/觀察期請保持關閉以免誤觸。")
+secret   = input.string("CHANGE_ME", "Webhook 密鑰 / passphrase", group="實盤 Webhook")
+exSymbol = input.string("",  "交易所代碼(空白=用圖表代碼)",   group="實盤 Webhook",
+     tooltip="例如 BTCUSDT.P、BTC-USDT-SWAP。留空則送 TradingView 的 {{ticker}}。")
+
+// ── 指標 ──
+atr   = ta.rma(ta.tr(true), atrLen)
+ema   = ta.ema(close, emaLen)
+vsma  = ta.sma(volume, rvolLen)
+rvol  = vsma > 0 ? volume / vsma : na
+boxHi = ta.highest(high, boxLen)[1]
+boxLo = ta.lowest(low,  boxLen)[1]
+isV   = not na(rvol) and rvol >= rvolMin
+
+longSig  = useLong  and close > boxHi + atrBuf*atr and isV and close > ema
+shortSig = useShort and close < boxLo - atrBuf*atr and isV and close < ema
+
+// ── 風險定額倉位:倉位 = (風險% × 權益) ÷ 停損距離 ──
+longDist  = math.max((close - low[1])  / close, minStopP)   // 多:前一根低點
+longQty   = math.min(strategy.equity*riskPct/100.0/(longDist *close), levCap*strategy.equity/close)
+shortDist = math.max((high[1] - close) / close, minStopP)   // 空:前一根高點
+shortQty  = math.min(strategy.equity*riskPct/100.0/(shortDist*close), levCap*strategy.equity/close)
+
+// ── webhook JSON 組裝(下單量在 order 觸發當下寫死成數字)──
+symTxt = exSymbol == "" ? syminfo.ticker : exSymbol
+f_msg(_action, _side, _qty) =>
+    '{"secret":"'   + secret +
+    '","ticker":"'  + symTxt +
+    '","action":"'  + _action +
+    '","side":"'    + _side +
+    '","qty":'      + str.tostring(_qty, "#.########") +
+    ',"price":'     + str.tostring(close, "#.########") +
+    ',"live":'      + (liveOn ? "true" : "false") +
+    ',"time":"'     + str.tostring(time) + '"}'
+
+// ── 倉位 / 停損狀態 ──
+var float pStop = na
+var float hh    = na
+var float ll    = na
+flat    = strategy.position_size == 0
+goLong  = flat and longSig  and longQty  > 0
+goShort = flat and shortSig and shortQty > 0
+
+if goLong
+    strategy.entry("多", strategy.long, qty=longQty,
+         alert_message = f_msg("buy", "long", longQty))
+    pStop := close - longDist*close
+    hh := high
+    ll := na
+else if goShort
+    strategy.entry("空", strategy.short, qty=shortQty,
+         alert_message = f_msg("sell", "short", shortQty))
+    pStop := close + shortDist*close
+    ll := low
+    hh := na
+
+// ── ATR 吊燈移動停利 + 出場 alert ──
+if strategy.position_size > 0 and not goLong
+    hh := math.max(nz(hh, high), high)
+    chand = hh - atrTrail*atr
+    pStop := math.max(nz(pStop, chand), chand)
+    strategy.exit("多出", "多", stop=pStop,
+         alert_message = f_msg("sell", "close_long", math.abs(strategy.position_size)))
+
+if strategy.position_size < 0 and not goShort
+    ll := math.min(nz(ll, low), low)
+    chand = ll + atrTrail*atr
+    pStop := math.min(nz(pStop, chand), chand)
+    strategy.exit("空出", "空", stop=pStop,
+         alert_message = f_msg("buy", "close_short", math.abs(strategy.position_size)))
+
+if flat
+    pStop := na
+    hh := na
+    ll := na
+
+// ── 視覺 ──
+plot(ema,   "EMA200",  color.new(color.orange,0))
+plot(boxHi, "上突破線", color.new(color.blue,60), style=plot.style_stepline)
+plot(boxLo, "下突破線", color.new(color.red,60),  style=plot.style_stepline)
+plot(strategy.position_size != 0 ? pStop : na, "停損", color.new(color.fuchsia,0), style=plot.style_linebr)
+bgcolor(longSig ? color.new(color.green,90) : shortSig ? color.new(color.red,90) : na)
+plot(strategy.position_size != 0 ? math.abs(strategy.position_size)*close/strategy.equity : na,
+     "進場槓桿", display=display.data_window)
