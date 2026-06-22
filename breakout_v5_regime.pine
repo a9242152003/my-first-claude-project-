@@ -1,0 +1,105 @@
+//@version=5
+strategy("放量突破 v5 · 風險定額 · 多空 · 牛熊濾網 — Claude", overlay=true, initial_capital=10000000, default_qty_type=strategy.fixed, commission_type=strategy.commission.percent, commission_value=0.055, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ── 進場 ──
+boxLen   = input.int(20,    "突破箱型長度",      group="進場")
+rvolLen  = input.int(20,    "量能均長",          group="進場")
+rvolMin  = input.float(1.3, "放量門檻 RVOL≥",    group="進場")
+emaLen   = input.int(200,   "趨勢濾網 EMA",      group="進場")
+atrBuf   = input.float(0.25,"突破緩衝 ×ATR",     group="進場")
+
+// ── 停損 / 保本 ──
+atrLen   = input.int(14,    "ATR 長度",          group="停損")
+atrTrail = input.float(3.5, "吊燈移動停利 ×ATR", group="停損")
+beMode   = input.string("關閉", "保本規則", options=["關閉","隔天走出去就保本","漲N個ATR後保本"], group="停損", tooltip="預設關閉:回測顯示保本會把賺錢單洗掉、報酬大跌。你若仍要上次說的規則,切到『隔天走出去就保本』。")
+beATR    = input.float(1.5, "N(僅『漲N個ATR後』有效)", group="停損")
+
+// ── 倉位 ──
+riskPct  = input.float(5,   "每筆風險 = 當前權益的 %", group="倉位", tooltip="權益1000萬、停損距離3%→開倉1666萬(1.67x),打到停損虧50萬=5%。")
+levCap   = input.float(5,   "槓桿上限(保險絲,倍)",   group="倉位")
+minStopP = input.float(0.5, "停損距離下限 %",        group="倉位") / 100.0
+
+// ── 方向 ──
+useLong  = input.bool(true, "做多", group="方向")
+useShort = input.bool(true, "做空", group="方向")
+shortReg = input.string("熊市才做空(EMA50<EMA200)", "空單牛熊濾網", options=["關閉(訊號到就做空)","熊市才做空(EMA50<EMA200)","熊市才做空(EMA100<EMA200)","EMA200下彎才做空"], group="方向", tooltip="牛市結構的空單9筆7虧(誘空),熊市的空單才賺;加濾網報酬+202%→+384~500%、回撤62%→41%、報酬/回撤3.3→8~12。三種定義差不多。")
+
+// ── 指標 ──
+atr   = ta.rma(ta.tr(true), atrLen)
+ema   = ta.ema(close, emaLen)
+e50   = ta.ema(close, 50)
+e100  = ta.ema(close, 100)
+vsma  = ta.sma(volume, rvolLen)
+rvol  = vsma > 0 ? volume / vsma : na
+boxHi = ta.highest(high, boxLen)[1]
+boxLo = ta.lowest(low,  boxLen)[1]
+isV   = not na(rvol) and rvol >= rvolMin
+bearReg = shortReg == "熊市才做空(EMA50<EMA200)" ? e50 < ema : shortReg == "熊市才做空(EMA100<EMA200)" ? e100 < ema : shortReg == "EMA200下彎才做空" ? ema < ema[20] : true
+longSig  = useLong  and close > boxHi + atrBuf*atr and isV and close > ema
+shortSig = useShort and bearReg and close < boxLo - atrBuf*atr and isV and close < ema
+
+// ── 風險定額倉位 ──
+longDist  = math.max((close - low[1]) / close,  minStopP)
+longQty   = math.min(strategy.equity*riskPct/100.0/(longDist*close), levCap*strategy.equity/close)
+shortDist = math.max((high[1] - close) / close, minStopP)
+shortQty  = math.min(strategy.equity*riskPct/100.0/(shortDist*close), levCap*strategy.equity/close)
+
+// ── 狀態 ──
+var float pStop   = na
+var float hh      = na
+var float ll      = na
+var float entryPx = na
+var float atrE    = na
+var bool  beArm   = false
+flat    = strategy.position_size == 0
+goLong  = flat and longSig  and longQty  > 0
+goShort = flat and shortSig and shortQty > 0
+
+// ── 進場 ──
+if goLong
+    strategy.entry("多", strategy.long, qty=longQty)
+    pStop := close - longDist*close
+    entryPx := close
+    atrE := atr
+    hh := high
+    beArm := false
+else if goShort
+    strategy.entry("空", strategy.short, qty=shortQty)
+    pStop := close + shortDist*close
+    entryPx := close
+    atrE := atr
+    ll := low
+    beArm := false
+
+// ── 多單管理 ──
+if strategy.position_size > 0 and not goLong
+    hh := math.max(nz(hh, high), high)
+    armNow = beMode == "隔天走出去就保本" and high > entryPx
+    armATR = beMode == "漲N個ATR後保本" and hh >= entryPx + beATR*atrE
+    if not beArm and (armNow or armATR)
+        beArm := true
+    pStop := math.max(nz(pStop, hh - atrTrail*atr), hh - atrTrail*atr)
+    if beArm
+        pStop := math.max(pStop, entryPx)
+    strategy.exit("多出", "多", stop=pStop)
+
+// ── 空單管理 ──
+if strategy.position_size < 0 and not goShort
+    ll := math.min(nz(ll, low), low)
+    armNow = beMode == "隔天走出去就保本" and low < entryPx
+    armATR = beMode == "漲N個ATR後保本" and ll <= entryPx - beATR*atrE
+    if not beArm and (armNow or armATR)
+        beArm := true
+    pStop := math.min(nz(pStop, ll + atrTrail*atr), ll + atrTrail*atr)
+    if beArm
+        pStop := math.min(pStop, entryPx)
+    strategy.exit("空出", "空", stop=pStop)
+
+// ── 視覺 ──
+plot(ema,   "EMA200",  color.new(color.orange,0))
+plot(e50,   "EMA50",   color.new(color.teal,40))
+plot(boxHi, "上突破線", color.new(color.blue,60), style=plot.style_stepline)
+plot(boxLo, "下突破線", color.new(color.red,60),  style=plot.style_stepline)
+plot(strategy.position_size != 0 ? pStop : na, "停損", color.new(color.fuchsia,0), style=plot.style_linebr)
+bgcolor(bearReg ? color.new(color.gray,92) : na, title="熊市結構(可做空)")
+plot(strategy.position_size != 0 ? math.abs(strategy.position_size)*close/strategy.equity : na, "進場槓桿", display=display.data_window)
