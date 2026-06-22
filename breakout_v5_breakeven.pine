@@ -79,7 +79,7 @@ if strategy.position_size > 0 and not goLong
     hh := math.max(nz(hh, high), high)
     chand = hh - atrTrail*atr
     // 保本觸發:①隔N根收在進場價上方  或  ②順向走過 beArm×ATR
-    armBars = beUseBars and (bar_index - entryBarIdx) >= beBars and close > entryPx
+    armBars = beUseBars and (bar_index - entryBarIdx) >= beBars and hh > entryPx
     armATR  = hh >= entryPx + beArm*atr
     beLevel = useBE and (armBars or armATR) ? entryPx * (1 + beOffset) : na
     floor = na(beLevel) ? chand : math.max(chand, beLevel)
@@ -88,7 +88,7 @@ if strategy.position_size > 0 and not goLong
 if strategy.position_size < 0 and not goShort
     ll := math.min(nz(ll, low), low)
     chand = ll + atrTrail*atr
-    armBars = beUseBars and (bar_index - entryBarIdx) >= beBars and close < entryPx
+    armBars = beUseBars and (bar_index - entryBarIdx) >= beBars and ll < entryPx
     armATR  = ll <= entryPx - beArm*atr
     beLevel = useBE and (armBars or armATR) ? entryPx * (1 - beOffset) : na
     ceil = na(beLevel) ? chand : math.min(chand, beLevel)
