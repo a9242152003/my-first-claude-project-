@@ -22,7 +22,10 @@ minStopP = input.float(0.5, "停損距離下限 %",        group="倉位") / 100
 // ── 方向 ──
 useLong  = input.bool(true, "做多", group="方向")
 useShort = input.bool(true, "做空", group="方向")
-shortReg = input.string("熊市才做空(EMA50<EMA200)", "空單牛熊濾網", options=["關閉(訊號到就做空)","熊市才做空(EMA50<EMA200)","熊市才做空(EMA100<EMA200)","EMA200下彎才做空"], group="方向", tooltip="牛市結構的空單9筆7虧(誘空),熊市的空單才賺;加濾網報酬+202%→+384~500%、回撤62%→41%、報酬/回撤3.3→8~12。三種定義差不多。")
+shortReg = input.string("熊市才做空(EMA50<EMA200)", "空單牛熊濾網", options=["關閉(訊號到就做空)","熊市才做空(EMA50<EMA200)","熊市才做空(EMA100<EMA200)","EMA200下彎才做空","STH-MVRV<門檻才做空"], group="方向", tooltip="牛市結構的空單9筆7虧(誘空),熊市的空單才賺;加濾網報酬+202%→+384~500%、回撤62%→41%、報酬/回撤3.3→8~12。三種EMA定義差不多。STH-MVRV版需把鏈上指標掛圖上、用下方來源選它的線。")
+sthSrc   = input.source(close, "STH-MVRV 來源(把鏈上指標掛圖上→選它的線)", group="方向", tooltip="⚠️預設是close(價格),沒手動指到STH-MVRV那條線的話它永遠>1=永遠不做空。務必改選那條指標的plot。")
+sthEnter = input.float(0.95, "STH-MVRV 開放做空門檻(跌破才空)", step=0.01, group="方向")
+sthExit  = input.float(1.05, "STH-MVRV 關閉做空門檻(站回才停)", step=0.01, group="方向", tooltip="遲滯:跌破『開放』才允許做空,站回『關閉』才禁止。避免在1.0附近抖動。")
 
 // ── 指標 ──
 atr   = ta.rma(ta.tr(true), atrLen)
@@ -34,7 +37,13 @@ rvol  = vsma > 0 ? volume / vsma : na
 boxHi = ta.highest(high, boxLen)[1]
 boxLo = ta.lowest(low,  boxLen)[1]
 isV   = not na(rvol) and rvol >= rvolMin
-bearReg = shortReg == "熊市才做空(EMA50<EMA200)" ? e50 < ema : shortReg == "熊市才做空(EMA100<EMA200)" ? e100 < ema : shortReg == "EMA200下彎才做空" ? ema < ema[20] : true
+// STH-MVRV 遲滯:跌破 sthEnter 進入可空狀態,站回 sthExit 退出
+var bool sthBear = false
+if sthSrc < sthEnter
+    sthBear := true
+else if sthSrc > sthExit
+    sthBear := false
+bearReg = shortReg == "熊市才做空(EMA50<EMA200)" ? e50 < ema : shortReg == "熊市才做空(EMA100<EMA200)" ? e100 < ema : shortReg == "EMA200下彎才做空" ? ema < ema[20] : shortReg == "STH-MVRV<門檻才做空" ? sthBear : true
 longSig  = useLong  and close > boxHi + atrBuf*atr and isV and close > ema
 shortSig = useShort and bearReg and close < boxLo - atrBuf*atr and isV and close < ema
 
