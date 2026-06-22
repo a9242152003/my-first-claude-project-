@@ -24,9 +24,12 @@ useShort = input.bool(true, "做空(空頭保險,多頭會付保費)")
 
 // ── 保本停損 ──
 useBE    = input.bool(true,  "啟用保本停損", group="保本",
-     tooltip="價格順向走出『啟動距離』後,把停損抬到進場價+緩衝。小賺後反轉→打平而非虧損;大趨勢不受影響(早就離開進場價了)。")
-beArm    = input.float(1.5,  "保本啟動距離 ×ATR", group="保本",
-     tooltip="順向走多遠才上保本。太小→正常回踩被洗、可能錯過趨勢;太大→保護來太慢。甜蜜點約1.0~2.0,要實測。")
+     tooltip="把停損抬到進場價+緩衝。小賺/小賠反轉→打平而非虧損;大趨勢不受影響(早就離開進場價了)。被掃出後若再突破會自動重進。")
+beUseBars= input.bool(true,  "觸發①:K棒數確認(隔N根站上進場價)", group="保本",
+     tooltip="你的規則:進場後隔 N 根K棒收在進場價之上(確認往上),就立刻上保本。預設1=隔天確認就保本。最積極。")
+beBars   = input.int(1,      "確認K棒數 N", group="保本", minval=1)
+beArm    = input.float(1.5,  "觸發②:順向走 ×ATR 才保本", group="保本",
+     tooltip="另一條觸發:順向走過這麼多ATR也上保本。兩條觸發誰先到算誰。設很大(如99)等於關掉這條。")
 beOffset = input.float(0.15, "保本緩衝 %(蓋手續費)", group="保本") / 100.0
 
 // ── 指標 ──
@@ -50,7 +53,8 @@ shortQty  = math.min(strategy.equity*riskPct/100.0/(shortDist*close), levCap*str
 var float pStop   = na
 var float hh      = na
 var float ll      = na
-var float entryPx = na   // 進場價(保本基準)
+var float entryPx     = na   // 進場價(保本基準)
+var int   entryBarIdx = na   // 進場K棒序號(算確認根數)
 flat   = strategy.position_size == 0
 goLong  = flat and inWindow and longSig  and longQty  > 0
 goShort = flat and inWindow and shortSig and shortQty > 0
@@ -59,12 +63,14 @@ if goLong
     strategy.entry("多", strategy.long, qty=longQty)
     pStop := close - longDist*close
     entryPx := close
+    entryBarIdx := bar_index
     hh := high
     ll := na
 else if goShort
     strategy.entry("空", strategy.short, qty=shortQty)
     pStop := close + shortDist*close
     entryPx := close
+    entryBarIdx := bar_index
     ll := low
     hh := na
 
@@ -72,15 +78,19 @@ else if goShort
 if strategy.position_size > 0 and not goLong
     hh := math.max(nz(hh, high), high)
     chand = hh - atrTrail*atr
-    // 保本:順向走過 beArm×ATR 後,把停損地板抬到進場價+緩衝
-    beLevel = useBE and hh >= entryPx + beArm*atr ? entryPx * (1 + beOffset) : na
+    // 保本觸發:①隔N根收在進場價上方  或  ②順向走過 beArm×ATR
+    armBars = beUseBars and (bar_index - entryBarIdx) >= beBars and close > entryPx
+    armATR  = hh >= entryPx + beArm*atr
+    beLevel = useBE and (armBars or armATR) ? entryPx * (1 + beOffset) : na
     floor = na(beLevel) ? chand : math.max(chand, beLevel)
     pStop := math.max(nz(pStop, floor), floor)
     strategy.exit("多出", "多", stop=pStop)
 if strategy.position_size < 0 and not goShort
     ll := math.min(nz(ll, low), low)
     chand = ll + atrTrail*atr
-    beLevel = useBE and ll <= entryPx - beArm*atr ? entryPx * (1 - beOffset) : na
+    armBars = beUseBars and (bar_index - entryBarIdx) >= beBars and close < entryPx
+    armATR  = ll <= entryPx - beArm*atr
+    beLevel = useBE and (armBars or armATR) ? entryPx * (1 - beOffset) : na
     ceil = na(beLevel) ? chand : math.min(chand, beLevel)
     pStop := math.min(nz(pStop, ceil), ceil)
     strategy.exit("空出", "空", stop=pStop)
@@ -89,6 +99,7 @@ if flat
     hh := na
     ll := na
     entryPx := na
+    entryBarIdx := na
 
 // ── 視覺 ──
 plot(ema,   "EMA200",  color.new(color.orange,0))
