@@ -1,0 +1,42 @@
+//@version=5
+// 聚合成交量 · 多交易所現貨/永續 — Claude
+// 用途:把各大交易所的量加總,避免被單一交易所(尤其永續的爆倉量)誤導,
+//       看「真實的市場參與度」與「爆量climax」落在哪裡,輔助判斷止跌/承接。
+// 提醒:聚合量只看「總量」,不分買賣。要分買賣請另開 TradingView 內建的
+//       「累積成交量差 CVD(Cumulative Volume Delta)」搭配看。
+indicator("聚合成交量 · 多交易所 — Claude", shorttitle="聚合量", format=format.volume)
+
+// ─── 現貨來源(真實買賣,判斷承接看這個)───
+g1 = "現貨來源"
+uBinance  = input.bool(true,  "Binance 現貨",  group=g1)
+uCoinbase = input.bool(true,  "Coinbase",      group=g1)
+uBybitS   = input.bool(true,  "Bybit 現貨",    group=g1)
+uOKX      = input.bool(true,  "OKX 現貨",      group=g1)
+uKraken   = input.bool(true,  "Kraken",        group=g1)
+uBitstamp = input.bool(false, "Bitstamp",      group=g1)
+
+// ─── 永續來源(含槓桿/爆倉,預設關;想看清算噪音再開)───
+g2 = "永續來源(槓桿/爆倉)"
+uBinanceP = input.bool(false, "Binance 永續",  group=g2)
+uBybitP   = input.bool(false, "Bybit 永續",    group=g2)
+uOKXP     = input.bool(false, "OKX 永續",      group=g2)
+
+// ─── 顯示 ───
+g3 = "顯示"
+maLen  = input.int(20,   "均量長度",       group=g3)
+climX  = input.float(2.0,"爆量門檻 ×均量", group=g3, step=0.5, tooltip="量 ≥ 這個倍數的均量就標黃色=爆量climax,常是止跌/送頭的候選點")
+
+// 安全抓量:來源不存在回 na → 補 0;單位都是 BTC base volume,可直接相加
+f(sym, on) => on ? nz(request.security(sym, timeframe.period, volume, ignore_invalid_symbol=true)) : 0.0
+
+spotVol = f("BINANCE:BTCUSDT", uBinance) + f("COINBASE:BTCUSD", uCoinbase) + f("BYBIT:BTCUSDT", uBybitS) + f("OKX:BTCUSDT", uOKX) + f("KRAKEN:XBTUSD", uKraken) + f("BITSTAMP:BTCUSD", uBitstamp)
+perpVol = f("BINANCE:BTCUSDT.P", uBinanceP) + f("BYBIT:BTCUSDT.P", uBybitP) + f("OKX:BTCUSDT.P", uOKXP)
+totVol  = spotVol + perpVol
+
+avgV     = ta.sma(totVol, maLen)
+isClimax = totVol >= climX * avgV
+
+col = isClimax ? color.new(color.yellow, 0) : (close >= open ? color.new(color.teal, 20) : color.new(color.red, 20))
+plot(totVol, "聚合量",   style=plot.style_columns, color=col)
+plot(avgV,   "均量",     color=color.new(color.orange, 0), linewidth=2)
+plot(perpVol > 0 ? spotVol : na, "純現貨量", color=color.new(color.blue, 40), style=plot.style_stepline)
