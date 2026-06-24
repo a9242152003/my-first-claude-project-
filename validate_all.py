@@ -109,7 +109,7 @@ def backtest(o,h,l,c,vol,t0=None,t1=None):
 def validate(ticker):
     import pandas as pd
     try:
-        df=yf.download(ticker, period="max", interval="1d", progress=False, auto_adjust=False)
+        df=yf.download(ticker, period="max", interval="1d", progress=False, auto_adjust=True)  # 還原股息,對齊 TradingView ADJ(高股息標的如0050才不會被除息假跳空搞爛)
     except Exception as e:
         return None, f"抓取失敗 {e}"
     if df is None or len(df)<300:
