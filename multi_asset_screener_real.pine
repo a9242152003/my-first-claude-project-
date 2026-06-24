@@ -1,0 +1,231 @@
+//@version=5
+// 多標的「真回測」燈號總表 — Claude
+// 掛在你的 BTC 圖上即可。每一列 = 一個標的,直接幫你跑「放量突破」全歷史回測,
+// 切前後兩半做樣本外檢驗,亮燈:🟢可做 / 🟡邊緣 / 🔴別碰,並顯示現在是多頭/空頭盤,
+// 讓你一眼決定要不要切過去交易。
+//
+// ⚠️ 這個很「重」:每個標的都在你圖上跑一次完整回測。標的越多越慢、甚至可能跑不出來。
+//    先用預設這 10 個。要加標的就一個一個加,若轉圈圈很久 = 到 Pine 計算上限了,把標的減少。
+// ⚠️ 用每個標的「自己的量」算 RVOL(對股票才有效)。TradingView 台股資料是準的,可放心。
+// ⚠️ 燈是「歷史上這策略在這標的有沒有效」,不是叫你立刻進場。實際進場看你主策略的訊號。
+indicator("多標的真回測燈號表 — Claude", overlay=true)
+
+// ── 參數(與主策略一致) ──
+boxLen   = 10
+rvolLen  = 20
+rvolMin  = 1.3
+emaLen   = 200
+atrLen   = 14
+atrBuf   = 0.25
+atrTrail = 3.5
+riskPct  = 5.0
+levCap   = 5.0
+minStopP = 0.005
+beATR    = 3.0
+COMM     = 0.00055
+INIT     = 1000000.0
+
+// ── 驗證門檻 ──
+splitDate = input.time(timestamp("2022-01-01 00:00 +0000"), "樣本外切割日", group="判準")
+minTr  = input.int(15,   "每半最低交易數",      group="判準")
+minPF  = input.float(1.3,"每半最低 PF",         group="判準")
+minRDD = input.float(3.0,"全期最低 報酬/回撤",  group="判準")
+posI   = input.string("右上","表格位置", options=["右上","右下","左上","左下","中央"], group="顯示")
+tpos = posI=="右下"?position.bottom_right : posI=="左上"?position.top_left : posI=="左下"?position.bottom_left : posI=="中央"?position.middle_center : position.top_right
+
+// ── 標的清單(BTC 優先,你主要做的擺前面) ──
+g = "標的(留白=不跑)"
+s1  = input.symbol("BINANCE:BTCUSDT",  "1",  group=g)
+s2  = input.symbol("BINANCE:ETHUSDT",  "2",  group=g)
+s3  = input.symbol("BINANCE:SOLUSDT",  "3",  group=g)
+s4  = input.symbol("BINANCE:BNBUSDT",  "4",  group=g)
+s5  = input.symbol("BINANCE:XRPUSDT",  "5",  group=g)
+s6  = input.symbol("BINANCE:ADAUSDT",  "6",  group=g)
+s7  = input.symbol("NASDAQ:NVDA",      "7",  group=g)
+s8  = input.symbol("NASDAQ:NFLX",      "8",  group=g)
+s9  = input.symbol("NASDAQ:AVGO",      "9",  group=g)
+s10 = input.symbol("TWSE:0050",        "10", group=g)
+s11 = input.symbol("",                 "11", group=g)
+s12 = input.symbol("",                 "12", group=g)
+
+// ── 回測引擎:在某標的的資料上跑完整突破策略,回傳 [報酬%, 回撤%, 前半PF, 前半筆, 後半PF, 後半筆, 現在多空] ──
+f_eval() =>
+    ema200 = ta.ema(close, emaLen)
+    atr    = ta.atr(atrLen)
+    vsma   = ta.sma(volume, rvolLen)
+    rvol   = vsma > 0 ? volume / vsma : 0.0
+    hh10   = ta.highest(high, boxLen)[1]
+    ll10   = ta.lowest(low,  boxLen)[1]
+    var float cash  = INIT
+    var int   pos   = 0
+    var float qty   = 0.0
+    var float entry = 0.0
+    var float pst   = 0.0
+    var float atrE  = 0.0
+    var float hh    = 0.0
+    var float ll    = 0.0
+    var bool  beArm = false
+    var float etime = 0.0
+    var float peak  = INIT
+    var float maxdd = 0.0
+    var float gpA   = 0.0
+    var float glA   = 0.0
+    var int   nA    = 0
+    var float gpB   = 0.0
+    var float glB   = 0.0
+    var int   nB    = 0
+    // 出場
+    if pos != 0 and not na(atr)
+        float ex = na
+        if pos > 0
+            if low <= pst
+                ex := open < pst ? open : pst
+        else
+            if high >= pst
+                ex := open > pst ? open : pst
+        if not na(ex)
+            float pnl = pos > 0 ? (ex - entry) * qty : (entry - ex) * qty
+            pnl := pnl - COMM * qty * (entry + ex)
+            cash := cash + pnl
+            if etime < splitDate
+                nA  := nA + 1
+                gpA := gpA + (pnl > 0 ? pnl : 0.0)
+                glA := glA + (pnl < 0 ? -pnl : 0.0)
+            else
+                nB  := nB + 1
+                gpB := gpB + (pnl > 0 ? pnl : 0.0)
+                glB := glB + (pnl < 0 ? -pnl : 0.0)
+            pos := 0
+        else
+            if pos > 0
+                hh := math.max(hh, high)
+                if not beArm and hh >= entry + beATR * atrE
+                    beArm := true
+                pst := math.max(pst, hh - atrTrail * atr)
+                if beArm
+                    pst := math.max(pst, entry)
+            else
+                ll := math.min(ll, low)
+                if not beArm and ll <= entry - beATR * atrE
+                    beArm := true
+                pst := math.min(pst, ll + atrTrail * atr)
+                if beArm
+                    pst := math.min(pst, entry)
+    // 進場
+    bool canTrade = pos == 0 and bar_index > emaLen and not na(atr) and not na(ema200[20]) and not na(hh10)
+    if canTrade
+        bool bear   = ema200 < ema200[20]
+        bool longS  = close > hh10 + atrBuf * atr and rvol >= rvolMin and close > ema200
+        bool shortS = bear and close < ll10 - atrBuf * atr and rvol >= rvolMin and close < ema200
+        if longS
+            float d = math.max((close - low[1]) / close, minStopP)
+            qty   := math.min(cash * riskPct / 100.0 / (d * close), levCap * cash / close)
+            pos   := 1
+            entry := close
+            pst   := close - d * close
+            atrE  := atr
+            hh    := high
+            beArm := false
+            etime := time
+        else if shortS
+            float d = math.max((high[1] - close) / close, minStopP)
+            qty   := math.min(cash * riskPct / 100.0 / (d * close), levCap * cash / close)
+            pos   := -1
+            entry := close
+            pst   := close + d * close
+            atrE  := atr
+            ll    := low
+            beArm := false
+            etime := time
+    // 市值/回撤
+    float mtm = cash + (pos == 0 ? 0.0 : pos > 0 ? (close - entry) * qty : (entry - close) * qty)
+    peak  := math.max(peak, mtm)
+    maxdd := math.max(maxdd, (peak - mtm) / peak * 100.0)
+    float netP = (cash - INIT) / INIT * 100.0
+    float pfA  = glA > 0 ? gpA / glA : (gpA > 0 ? 99.0 : 0.0)
+    float pfB  = glB > 0 ? gpB / glB : (gpB > 0 ? 99.0 : 0.0)
+    int   regn = na(ema200) or na(ema200[20]) ? 0 : (ema200 > ema200[20] and close > ema200 ? 1 : (ema200 < ema200[20] and close < ema200 ? -1 : 0))
+    [netP, maxdd, pfA, nA, pfB, nB, regn]
+
+f_req(sym) =>
+    request.security(sym, "1D", f_eval(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+// ── 跑所有標的 ──
+[n1,d1,a1,na1,b1,nb1,r1]    = f_req(s1)
+[n2,d2,a2,na2,b2,nb2,r2]    = f_req(s2)
+[n3,d3,a3,na3,b3,nb3,r3]    = f_req(s3)
+[n4,d4,a4,na4,b4,nb4,r4]    = f_req(s4)
+[n5,d5,a5,na5,b5,nb5,r5]    = f_req(s5)
+[n6,d6,a6,na6,b6,nb6,r6]    = f_req(s6)
+[n7,d7,a7,na7,b7,nb7,r7]    = f_req(s7)
+[n8,d8,a8,na8,b8,nb8,r8]    = f_req(s8)
+[n9,d9,a9,na9,b9,nb9,r9]    = f_req(s9)
+[n10,d10,a10,na10,b10,nb10,r10] = f_req(s10)
+[n11,d11,a11,na11,b11,nb11,r11] = f_req(s11)
+[n12,d12,a12,na12,b12,nb12,r12] = f_req(s12)
+
+// ── 表格 ──
+var table tb = table.new(tpos, 7, 14, border_width=1, frame_width=1, frame_color=color.gray)
+gC = color.new(color.green, 0)
+yC = color.new(color.orange, 0)
+rC = color.new(color.red, 0)
+kC = color.new(color.gray, 20)
+hC = color.new(color.blue, 0)
+
+f_cell(row, sym, netP, ddP, pfA, nA, pfB, nB, regn) =>
+    short = str.replace_all(str.replace_all(str.replace_all(sym, "BINANCE:", ""), "NASDAQ:", ""), "TWSE:", "")
+    rdd   = ddP > 0 ? netP / ddP : 0.0
+    passA = nA >= minTr and pfA >= minPF
+    passB = nB >= minTr and pfB >= minPF
+    passR = rdd >= minRDD
+    total = nA + nB
+    bool isPass = passA and passB and passR
+    bool isMid  = (not isPass) and rdd >= minRDD * 0.6 and total >= minTr
+    lamp  = total == 0 ? "⚪" : isPass ? "🟢" : isMid ? "🟡" : "🔴"
+    lampC = total == 0 ? kC : isPass ? gC : isMid ? yC : rC
+    reg   = regn == 1 ? "📈多頭" : regn == -1 ? "📉空頭" : "➖盤整"
+    regC  = regn == 1 ? gC : regn == -1 ? rC : kC
+    table.cell(tb, 0, row, short, text_color=color.white, bgcolor=kC, text_size=size.normal)
+    table.cell(tb, 1, row, lamp,  text_color=color.white, bgcolor=lampC, text_size=size.normal)
+    table.cell(tb, 2, row, str.tostring(netP, "#")+"%",  text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 3, row, str.tostring(rdd, "#.0"),     text_color=color.white, bgcolor=passR?gC:rC, text_size=size.small)
+    table.cell(tb, 4, row, str.tostring(nA)+"/"+str.tostring(pfA,"#.0"), text_color=color.white, bgcolor=passA?gC:rC, text_size=size.small)
+    table.cell(tb, 5, row, str.tostring(nB)+"/"+str.tostring(pfB,"#.0"), text_color=color.white, bgcolor=passB?gC:rC, text_size=size.small)
+    table.cell(tb, 6, row, reg, text_color=color.white, bgcolor=regC, text_size=size.small)
+
+if barstate.islast
+    table.cell(tb, 0, 0, "標的", text_color=color.white, bgcolor=hC, text_size=size.normal)
+    table.cell(tb, 1, 0, "燈",   text_color=color.white, bgcolor=hC, text_size=size.normal)
+    table.cell(tb, 2, 0, "報酬", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 3, 0, "報酬/回撤", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 4, 0, "前半 筆/PF", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 5, 0, "後半 筆/PF", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 6, 0, "現在", text_color=color.white, bgcolor=hC, text_size=size.small)
+    if s1  != ""
+        f_cell(1,  s1,  n1,  d1,  a1,  na1,  b1,  nb1,  r1)
+    if s2  != ""
+        f_cell(2,  s2,  n2,  d2,  a2,  na2,  b2,  nb2,  r2)
+    if s3  != ""
+        f_cell(3,  s3,  n3,  d3,  a3,  na3,  b3,  nb3,  r3)
+    if s4  != ""
+        f_cell(4,  s4,  n4,  d4,  a4,  na4,  b4,  nb4,  r4)
+    if s5  != ""
+        f_cell(5,  s5,  n5,  d5,  a5,  na5,  b5,  nb5,  r5)
+    if s6  != ""
+        f_cell(6,  s6,  n6,  d6,  a6,  na6,  b6,  nb6,  r6)
+    if s7  != ""
+        f_cell(7,  s7,  n7,  d7,  a7,  na7,  b7,  nb7,  r7)
+    if s8  != ""
+        f_cell(8,  s8,  n8,  d8,  a8,  na8,  b8,  nb8,  r8)
+    if s9  != ""
+        f_cell(9,  s9,  n9,  d9,  a9,  na9,  b9,  nb9,  r9)
+    if s10 != ""
+        f_cell(10, s10, n10, d10, a10, na10, b10, nb10, r10)
+    if s11 != ""
+        f_cell(11, s11, n11, d11, a11, na11, b11, nb11, r11)
+    if s12 != ""
+        f_cell(12, s12, n12, d12, a12, na12, b12, nb12, r12)
+    table.cell(tb, 0, 13, "🟢可做 🟡邊緣 🔴別碰", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 1, 13, "", bgcolor=kC)
+    table.cell(tb, 2, 13, "判準:兩半各≥"+str.tostring(minTr)+"筆 PF≥"+str.tostring(minPF,"#.0")+" 全RDD≥"+str.tostring(minRDD,"#.0"), text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.merge_cells(tb, 2, 13, 6, 13)
