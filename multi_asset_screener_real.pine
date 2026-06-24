@@ -1,15 +1,14 @@
 //@version=5
-// 多標的「真回測」綠燈總表(30 檔篩選)— Claude
-// 掛在你的 BTC 日線圖上。幣前10 + 美股前10 + 台股前10,每檔跑完整「放量突破」全歷史回測,
-// 切前後兩半做樣本外檢驗。打開「只顯示綠燈」→ 表格只剩通過嚴格檢驗、值得做的標的。
+// 多標的「真回測 + 失真檢測」綠燈總表(30 檔)— Claude
+// 掛在 BTC 日線圖。幣前10 + 美股前10 + 台股前10,每檔跑完整「放量突破」全歷史回測,
+// 並把「近 N 天」單獨拉出來跟全歷史比 → 偵測邊際是否衰退(失真)。
+// 「只顯示綠燈」= 只剩「歷史有效 且 近期沒走樣」的標的。
 //
-// ⚠️ 很「重」:30 檔 = 在你圖上跑 30 次回測,可能轉很久甚至跑不出來(Pine 計算上限)。
-//    若卡住:把某一類的 10 格留白(分批跑),例如先跑幣+美股,記下綠燈,再換台股。
-// ⚠️ 用每檔「自己的量」算 RVOL(對股票才有效)。TradingView 台股資料是準的。
-// ⚠️ 燈=歷史上這策略在這標的有沒有效,不是叫你立刻進場。進場看你主策略的訊號。
-indicator("綠燈標的總表(30檔篩選)— Claude", overlay=true)
+// ⚠️ 很重:30 檔 = 跑 30 次回測,可能轉很久。卡住就把某類 10 格留白分批跑。
+// ⚠️ 趨勢策略交易疏,近期窗口太短會只有幾筆 → 雜訊大。預設 365 天較穩。
+// ⚠️ 燈=這策略在這標的歷史有沒有效+現在有沒有失真,不是叫你立刻進場。
+indicator("綠燈總表+失真檢測(30檔)— Claude", overlay=true)
 
-// ── 參數(與主策略一致) ──
 boxLen   = 10
 rvolLen  = 20
 rvolMin  = 1.3
@@ -24,16 +23,18 @@ beATR    = 3.0
 COMM     = 0.00055
 INIT     = 1000000.0
 
-// ── 驗證門檻 ──
-splitDate = input.time(timestamp("2022-01-01 00:00 +0000"), "樣本外切割日", group="判準")
-minTr  = input.int(15,   "每半最低交易數",      group="判準")
-minPF  = input.float(1.3,"每半最低 PF",         group="判準")
-minRDD = input.float(3.0,"全期最低 報酬/回撤",  group="判準")
+// ── 判準 ──
+minTr   = input.int(20,   "全期最低交易數",       group="判準")
+minPF   = input.float(1.3,"全期最低 PF",          group="判準")
+minRDD  = input.float(3.0,"全期最低 報酬/回撤",   group="判準")
+recWin  = input.int(365,  "近期窗口(天)",         group="失真檢測")
+minRec  = input.int(4,    "近期最低交易數(低於=樣本少)", group="失真檢測")
+decayR  = input.float(0.5,"近/全 PF 低於此比例=失真", group="失真檢測")
+weakR   = input.float(0.7,"近/全 PF 低於此比例=變弱", group="失真檢測")
 greenOnly = input.bool(true, "只顯示綠燈(關掉=全部都顯示)", group="顯示")
 posI   = input.string("右上","表格位置", options=["右上","右下","左上","左下","中央"], group="顯示")
 tpos = posI=="右下"?position.bottom_right : posI=="左上"?position.top_left : posI=="左下"?position.bottom_left : posI=="中央"?position.middle_center : position.top_right
 
-// ── 加密前10大 ──
 gc = "加密前10大"
 s1  = input.symbol("BINANCE:BTCUSDT",  "幣1",  group=gc)
 s2  = input.symbol("BINANCE:ETHUSDT",  "幣2",  group=gc)
@@ -45,7 +46,6 @@ s7  = input.symbol("BINANCE:DOGEUSDT", "幣7",  group=gc)
 s8  = input.symbol("BINANCE:AVAXUSDT", "幣8",  group=gc)
 s9  = input.symbol("BINANCE:TRXUSDT",  "幣9",  group=gc)
 s10 = input.symbol("BINANCE:LINKUSDT", "幣10", group=gc)
-// ── 美股前10大 ──
 gu = "美股前10大"
 s11 = input.symbol("NASDAQ:NVDA",  "美1",  group=gu)
 s12 = input.symbol("NASDAQ:AAPL",  "美2",  group=gu)
@@ -57,7 +57,6 @@ s17 = input.symbol("NASDAQ:TSLA",  "美7",  group=gu)
 s18 = input.symbol("NASDAQ:AVGO",  "美8",  group=gu)
 s19 = input.symbol("NASDAQ:AMD",   "美9",  group=gu)
 s20 = input.symbol("NASDAQ:NFLX",  "美10", group=gu)
-// ── 台股前10大 ──
 gt = "台股前10大"
 s21 = input.symbol("TWSE:2330", "台1",  group=gt)
 s22 = input.symbol("TWSE:2317", "台2",  group=gt)
@@ -70,7 +69,7 @@ s28 = input.symbol("TWSE:2881", "台8",  group=gt)
 s29 = input.symbol("TWSE:3711", "台9",  group=gt)
 s30 = input.symbol("TWSE:2603", "台10", group=gt)
 
-// ── 回測引擎:回傳 [報酬%, 回撤%, 前半PF, 前半筆, 後半PF, 後半筆, 現在多空] ──
+// ── 回測引擎:回傳 [報酬%, 回撤%, 全期PF, 全期筆, 近期PF, 近期筆, 現在多空] ──
 f_eval() =>
     ema200 = ta.ema(close, emaLen)
     atr    = ta.atr(atrLen)
@@ -90,12 +89,11 @@ f_eval() =>
     var float etime = 0.0
     var float peak  = INIT
     var float maxdd = 0.0
-    var float gpA   = 0.0
-    var float glA   = 0.0
-    var int   nA    = 0
-    var float gpB   = 0.0
-    var float glB   = 0.0
-    var int   nB    = 0
+    var float gpAll = 0.0
+    var float glAll = 0.0
+    var int   nAll  = 0
+    var array<float> plArr = array.new_float(0)
+    var array<float> etArr = array.new_float(0)
     if pos != 0 and not na(atr)
         float ex = na
         if pos > 0
@@ -108,14 +106,11 @@ f_eval() =>
             float pnl = pos > 0 ? (ex - entry) * qty : (entry - ex) * qty
             pnl := pnl - COMM * qty * (entry + ex)
             cash := cash + pnl
-            if etime < splitDate
-                nA  := nA + 1
-                gpA := gpA + (pnl > 0 ? pnl : 0.0)
-                glA := glA + (pnl < 0 ? -pnl : 0.0)
-            else
-                nB  := nB + 1
-                gpB := gpB + (pnl > 0 ? pnl : 0.0)
-                glB := glB + (pnl < 0 ? -pnl : 0.0)
+            nAll  := nAll + 1
+            gpAll := gpAll + (pnl > 0 ? pnl : 0.0)
+            glAll := glAll + (pnl < 0 ? -pnl : 0.0)
+            array.push(plArr, pnl)
+            array.push(etArr, etime)
             pos := 0
         else
             if pos > 0
@@ -160,16 +155,28 @@ f_eval() =>
     float mtm = cash + (pos == 0 ? 0.0 : pos > 0 ? (close - entry) * qty : (entry - close) * qty)
     peak  := math.max(peak, mtm)
     maxdd := math.max(maxdd, (peak - mtm) / peak * 100.0)
-    float netP = (cash - INIT) / INIT * 100.0
-    float pfA  = glA > 0 ? gpA / glA : (gpA > 0 ? 99.0 : 0.0)
-    float pfB  = glB > 0 ? gpB / glB : (gpB > 0 ? 99.0 : 0.0)
-    int   regn = na(ema200) or na(ema200[20]) ? 0 : (ema200 > ema200[20] and close > ema200 ? 1 : (ema200 < ema200[20] and close < ema200 ? -1 : 0))
-    [netP, maxdd, pfA, nA, pfB, nB, regn]
+    float netP   = (cash - INIT) / INIT * 100.0
+    float pfFull = glAll > 0 ? gpAll / glAll : (gpAll > 0 ? 99.0 : 0.0)
+    // 近期窗口:只在最後一根算(省資源)
+    float pfRec = 0.0
+    int   nRec  = 0
+    if barstate.islast and array.size(plArr) > 0
+        float cut = time - recWin * 86400000.0
+        float rgp = 0.0
+        float rgl = 0.0
+        for i = 0 to array.size(plArr) - 1
+            if array.get(etArr, i) >= cut
+                float p = array.get(plArr, i)
+                nRec := nRec + 1
+                rgp  := rgp + (p > 0 ? p : 0.0)
+                rgl  := rgl + (p < 0 ? -p : 0.0)
+        pfRec := rgl > 0 ? rgp / rgl : (rgp > 0 ? 99.0 : 0.0)
+    int regn = na(ema200) or na(ema200[20]) ? 0 : (ema200 > ema200[20] and close > ema200 ? 1 : (ema200 < ema200[20] and close < ema200 ? -1 : 0))
+    [netP, maxdd, pfFull, nAll, pfRec, nRec, regn]
 
 f_req(sym) =>
     request.security(sym, "1D", f_eval(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
 
-// ── 跑全部 30 檔 ──
 [n1,d1,a1,na1,b1,nb1,r1]    = f_req(s1)
 [n2,d2,a2,na2,b2,nb2,r2]    = f_req(s2)
 [n3,d3,a3,na3,b3,nb3,r3]    = f_req(s3)
@@ -201,7 +208,6 @@ f_req(sym) =>
 [n29,d29,a29,na29,b29,nb29,r29] = f_req(s29)
 [n30,d30,a30,na30,b30,nb30,r30] = f_req(s30)
 
-// ── 表格 ──
 var table tb = table.new(tpos, 7, 33, border_width=1, frame_width=1, frame_color=color.gray)
 gC = color.new(color.green, 0)
 yC = color.new(color.orange, 0)
@@ -209,36 +215,47 @@ rC = color.new(color.red, 0)
 kC = color.new(color.gray, 20)
 hC = color.new(color.blue, 0)
 
-f_pass(netP, ddP, pfA, nA, pfB, nB) =>
+// 分級:0=紅 1=黃 2=綠
+f_class(netP, ddP, pfFull, nFull, pfRec, nRec) =>
     rdd = ddP > 0 ? netP / ddP : 0.0
-    (nA >= minTr and pfA >= minPF) and (nB >= minTr and pfB >= minPF) and (rdd >= minRDD)
+    bool baseOK = nFull >= minTr and rdd >= minRDD and pfFull >= minPF
+    float ratio = pfFull > 0 ? pfRec / pfFull : 0.0
+    int cls = 2
+    if not baseOK
+        cls := 0
+    else if nRec < minRec
+        cls := 1
+    else if pfRec < 1.0 or ratio < decayR
+        cls := 0
+    else if ratio < weakR
+        cls := 1
+    else
+        cls := 2
+    cls
 
-f_cell(row, sym, netP, ddP, pfA, nA, pfB, nB, regn) =>
+f_cell(row, sym, netP, ddP, pfFull, nFull, pfRec, nRec, regn) =>
     parts = str.split(sym, ":")
     short = array.size(parts) > 1 ? array.get(parts, array.size(parts) - 1) : sym
     rdd   = ddP > 0 ? netP / ddP : 0.0
-    passA = nA >= minTr and pfA >= minPF
-    passB = nB >= minTr and pfB >= minPF
-    passR = rdd >= minRDD
-    total = nA + nB
-    bool isPass = passA and passB and passR
-    bool isMid  = (not isPass) and rdd >= minRDD * 0.6 and total >= minTr
-    lamp  = total == 0 ? "⚪" : isPass ? "🟢" : isMid ? "🟡" : "🔴"
-    lampC = total == 0 ? kC : isPass ? gC : isMid ? yC : rC
+    ratio = pfFull > 0 ? pfRec / pfFull : 0.0
+    cls   = f_class(netP, ddP, pfFull, nFull, pfRec, nRec)
+    lamp  = nFull == 0 ? "⚪" : cls == 2 ? "🟢" : cls == 1 ? "🟡" : "🔴"
+    lampC = nFull == 0 ? kC : cls == 2 ? gC : cls == 1 ? yC : rC
     reg   = regn == 1 ? "📈多頭" : regn == -1 ? "📉空頭" : "➖盤整"
     regC  = regn == 1 ? gC : regn == -1 ? rC : kC
+    ratioC = ratio >= weakR ? gC : ratio >= decayR ? yC : rC
     table.cell(tb, 0, row, short, text_color=color.white, bgcolor=kC, text_size=size.normal)
     table.cell(tb, 1, row, lamp,  text_color=color.white, bgcolor=lampC, text_size=size.normal)
-    table.cell(tb, 2, row, str.tostring(netP, "#")+"%",  text_color=color.white, bgcolor=kC, text_size=size.small)
-    table.cell(tb, 3, row, str.tostring(rdd, "#.0"),     text_color=color.white, bgcolor=passR?gC:rC, text_size=size.small)
-    table.cell(tb, 4, row, str.tostring(nA)+"/"+str.tostring(pfA,"#.0"), text_color=color.white, bgcolor=passA?gC:rC, text_size=size.small)
-    table.cell(tb, 5, row, str.tostring(nB)+"/"+str.tostring(pfB,"#.0"), text_color=color.white, bgcolor=passB?gC:rC, text_size=size.small)
+    table.cell(tb, 2, row, str.tostring(pfFull,"#.0"), text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 3, row, str.tostring(nRec)+"/"+str.tostring(pfRec,"#.0"), text_color=color.white, bgcolor=nRec<minRec?yC:(pfRec>=1.0?gC:rC), text_size=size.small)
+    table.cell(tb, 4, row, str.tostring(ratio,"#.00"), text_color=color.white, bgcolor=ratioC, text_size=size.small)
+    table.cell(tb, 5, row, str.tostring(rdd,"#.0"), text_color=color.white, bgcolor=rdd>=minRDD?gC:rC, text_size=size.small)
     table.cell(tb, 6, row, reg, text_color=color.white, bgcolor=regC, text_size=size.small)
 
-f_draw(row, sym, netP, ddP, pfA, nA, pfB, nB, regn) =>
+f_draw(row, sym, netP, ddP, pfFull, nFull, pfRec, nRec, regn) =>
     int out = row
-    if sym != "" and ((not greenOnly) or f_pass(netP, ddP, pfA, nA, pfB, nB))
-        f_cell(row, sym, netP, ddP, pfA, nA, pfB, nB, regn)
+    if sym != "" and ((not greenOnly) or f_class(netP, ddP, pfFull, nFull, pfRec, nRec) == 2)
+        f_cell(row, sym, netP, ddP, pfFull, nFull, pfRec, nRec, regn)
         out := row + 1
     out
 
@@ -246,10 +263,10 @@ if barstate.islast
     table.clear(tb, 0, 0, 6, 32)
     table.cell(tb, 0, 0, "標的", text_color=color.white, bgcolor=hC, text_size=size.normal)
     table.cell(tb, 1, 0, "燈",   text_color=color.white, bgcolor=hC, text_size=size.normal)
-    table.cell(tb, 2, 0, "報酬", text_color=color.white, bgcolor=hC, text_size=size.small)
-    table.cell(tb, 3, 0, "報酬/回撤", text_color=color.white, bgcolor=hC, text_size=size.small)
-    table.cell(tb, 4, 0, "前半 筆/PF", text_color=color.white, bgcolor=hC, text_size=size.small)
-    table.cell(tb, 5, 0, "後半 筆/PF", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 2, 0, "全PF", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 3, 0, "近期 筆/PF", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 4, 0, "近/全", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 5, 0, "報酬/回撤", text_color=color.white, bgcolor=hC, text_size=size.small)
     table.cell(tb, 6, 0, "現在", text_color=color.white, bgcolor=hC, text_size=size.small)
     int rr = 1
     rr := f_draw(rr, s1,  n1,  d1,  a1,  na1,  b1,  nb1,  r1)
@@ -286,5 +303,5 @@ if barstate.islast
         table.cell(tb, 0, 1, "(目前無綠燈)", text_color=color.white, bgcolor=kC, text_size=size.normal)
         rr := 2
     table.cell(tb, 0, rr, "綠燈 "+str.tostring(rr-1)+" 檔", text_color=color.white, bgcolor=kC, text_size=size.small)
-    table.cell(tb, 2, rr, "判準:兩半各≥"+str.tostring(minTr)+"筆 PF≥"+str.tostring(minPF,"#.0")+" 全RDD≥"+str.tostring(minRDD,"#.0")+"(關開關看全部🟢🟡🔴)", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 2, rr, "近="+str.tostring(recWin)+"天;近/全<"+str.tostring(decayR,"#.0")+"=失真,<"+str.tostring(weakR,"#.0")+"=變弱(關開關看全部)", text_color=color.white, bgcolor=kC, text_size=size.small)
     table.merge_cells(tb, 2, rr, 6, rr)
