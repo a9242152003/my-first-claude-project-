@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "0 0 1 * *"
   workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths-ignore:
+      - health_table.md   # 排除自己 commit 的表,避免無限觸發
 
 permissions:
   contents: write
