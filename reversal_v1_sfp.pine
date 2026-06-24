@@ -1,0 +1,163 @@
+//@version=5
+// 順勢逆勢 v1 · SFP沒力反轉 · 風險定額 — Claude
+// 設計來自多代理綜合:核心觸發=SFP掃單收回(抓得到V型);背離/RSI/MACD/z=convScore加分(不單獨觸發);
+//   逼空/V型硬否決閘;結構停損(擺動極值+0.5ATR)+風險定額倉位;純日線OHLC、可全歷史回測、不repaint。
+// 大勢:EMA200下彎=熊市只空反彈;EMA200上彎=牛市只多回檔。
+strategy("順勢逆勢 v1 · SFP沒力反轉 — Claude", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, commission_type=strategy.commission.percent, commission_value=0.055, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ═══ 方向 ═══
+useLong  = input.bool(true,  "做多(牛市抓回檔沒力)", group="方向")
+useShort = input.bool(true,  "做空(熊市抓反彈沒力)", group="方向")
+
+// ═══ 大勢 setup ═══
+emaLen   = input.int(200, "趨勢 EMA",            group="setup")
+slopeLB  = input.int(20,  "EMA 斜率回看",        group="setup")
+adxMin   = input.float(20,"ADX 純度門檻(擋盤整)", group="setup")
+waveLB   = input.int(3,   "逆波成形回看",        group="setup")
+
+// ═══ SFP 沒力觸發(核心)═══
+sweepN   = input.int(10,  "掃單參考:近N根高/低", group="SFP")
+wickATR  = input.float(0.25,"有意義影線 ×ATR",    group="SFP")
+
+// ═══ convScore 加分(不單獨觸發)═══
+convMin  = input.int(1,   "最低 convScore 才進場(0=純SFP)", group="確認加分")
+rsiHiS   = input.float(58,"空:RSI 反彈過熱門檻",  group="確認加分")
+rsiLoL   = input.float(42,"多:RSI 回檔超賣門檻",  group="確認加分")
+zTh      = input.float(2.0,"乖離 z 門檻 σ",        group="確認加分")
+
+// ═══ 否決閘(硬擋逼空/V型)═══
+bbLen    = input.int(20,  "布林長度",            group="否決")
+bigATR   = input.float(3.0,"單根>N×ATR 禁入",     group="否決")
+minWave  = input.float(1.5,"逆波最小幅度 ×ATR",   group="否決")
+
+// ═══ 部位/出場 ═══
+riskPct  = input.float(5.0,"每筆風險 %(當前權益)", group="部位")
+convBoost= input.float(1.5,"convScore≥2 風險加成",  group="部位")
+levCap   = input.float(5.0,"最大槓桿上限",         group="部位")
+swingLen = input.int(5,    "結構停損:近N根擺動極值", group="部位")
+stopBuf  = input.float(0.5,"停損緩衝 ×ATR",        group="部位")
+rrMin    = input.float(1.5,"最低風報比 RR(0=不檢查)", group="部位")
+atrTrail = input.float(3.0,"吊燈移動停利 ×ATR",    group="部位")
+
+// ═══ 回測視窗(免Premium)═══
+useWindow = input.bool(false,"限定回測起始日", group="回測視窗")
+startDate = input.time(timestamp("2018-01-01 00:00 +0000"),"回測起始日", group="回測視窗")
+inWindow  = not useWindow or time >= startDate
+
+// ═══ 指標 ═══
+ema200 = ta.ema(close, emaLen)
+ema50  = ta.ema(close, 50)
+atr    = ta.atr(14)
+rsi    = ta.rsi(close, 14)
+[mLine, sLine, hLine] = ta.macd(close, 12, 26, 9)
+[plusDI, minusDI, adxV] = ta.dmi(14, 14)
+basis  = ta.sma(close, bbLen)
+dev2   = ta.stdev(close, bbLen)
+bbUp   = basis + 2*dev2
+bbDn   = basis - 2*dev2
+devm   = close - ema50
+zmean  = ta.sma(devm, 100)
+zstd   = ta.stdev(devm, 100)
+z      = zstd > 0 ? (devm - zmean)/zstd : 0.0
+
+bearTrend = ema200 < ema200[slopeLB]
+bullTrend = ema200 > ema200[slopeLB]
+trendPure = adxV > adxMin
+
+// ═══ 逆波成形 ═══
+rallyUp = close > close[waveLB] and close < ema200   // 熊市:反彈但仍在EMA200下
+pullDn  = close < close[waveLB] and close > ema200    // 牛市:回檔但仍在EMA200上
+
+// ═══ SFP 掃單收回(核心觸發,單一極值就能抓→不漏V型)═══
+swingHi = ta.highest(high, sweepN)[1]
+swingLo = ta.lowest(low,  sweepN)[1]
+sweepHigh = high > swingHi and close < swingHi
+sweepLow  = low  < swingLo and close > swingLo
+wickUp = (high - math.max(open,close)) > wickATR*atr
+wickDn = (math.min(open,close) - low) > wickATR*atr
+sfpShort = bearTrend and trendPure and rallyUp and sweepHigh and wickUp
+sfpLong  = bullTrend and trendPure and pullDn  and sweepLow  and wickDn
+
+// ═══ convScore(加分,缺席不擋、存在加倉)═══
+rsiFadeS = rsi[1] >= rsiHiS and rsi < rsi[1]
+histFadeS= hLine > 0 and hLine < hLine[1] and hLine[1] < hLine[2]
+zFadeS   = z[1] >= zTh and z < z[1]
+convS = (rsiFadeS?1:0) + (histFadeS?1:0) + (zFadeS?1:0)
+rsiFadeL = rsi[1] <= rsiLoL and rsi > rsi[1]
+histFadeL= hLine < 0 and hLine > hLine[1] and hLine[1] > hLine[2]
+zFadeL   = z[1] <= -zTh and z > z[1]
+convL = (rsiFadeL?1:0) + (histFadeL?1:0) + (zFadeL?1:0)
+
+// ═══ 否決閘 ═══
+bigBar = (high - low) > bigATR*atr
+squeezeShort = math.sum(close > bbUp ? 1 : 0, 5) >= 3
+squeezeLong  = math.sum(close < bbDn ? 1 : 0, 5) >= 3
+waveOKShort = (high - ta.lowest(low, sweepN)[1]) >= minWave*atr
+waveOKLong  = (ta.highest(high, sweepN)[1] - low) >= minWave*atr
+vetoShort = squeezeShort or bigBar or not waveOKShort
+vetoLong  = squeezeLong  or bigBar or not waveOKLong
+
+// ═══ 結構停損 + RR ═══
+stopHi = math.max(ta.highest(high, swingLen)[1], high) + stopBuf*atr
+stopLo = math.min(ta.lowest(low,  swingLen)[1], low)  - stopBuf*atr
+tgtShort = ta.lowest(low, sweepN)[1]
+tgtLong  = ta.highest(high, sweepN)[1]
+shortDist = (stopHi - close)/close
+longDist  = (close - stopLo)/close
+rrShort = shortDist > 0 ? ((close - tgtShort)/close) / shortDist : 0.0
+rrLong  = longDist  > 0 ? ((tgtLong - close)/close) / longDist  : 0.0
+rrOKShort = rrMin <= 0 or rrShort >= rrMin
+rrOKLong  = rrMin <= 0 or rrLong  >= rrMin
+
+// ═══ 進場訊號 ═══
+goShortSig = useShort and inWindow and sfpShort and not vetoShort and convS >= convMin and rrOKShort and shortDist > 0
+goLongSig  = useLong  and inWindow and sfpLong  and not vetoLong  and convL >= convMin and rrOKLong  and longDist  > 0
+
+// ═══ 倉位(convScore≥2 加碼)═══
+riskS = riskPct * (convS >= 2 ? convBoost : 1.0)
+riskL = riskPct * (convL >= 2 ? convBoost : 1.0)
+shortQty = math.min(strategy.equity*riskS/100.0/(shortDist*close), levCap*strategy.equity/close)
+longQty  = math.min(strategy.equity*riskL/100.0/(longDist *close), levCap*strategy.equity/close)
+
+// ═══ 狀態 ═══
+var float pStop = na
+var float hh = na
+var float ll = na
+flat = strategy.position_size == 0
+
+if flat and goLongSig
+    strategy.entry("多", strategy.long, qty=longQty)
+    pStop := stopLo
+    hh := high
+    ll := na
+else if flat and goShortSig
+    strategy.entry("空", strategy.short, qty=shortQty)
+    pStop := stopHi
+    ll := low
+    hh := na
+
+// ═══ 管理:ATR 吊燈移動停利(初始=結構停損)═══
+if strategy.position_size > 0
+    hh := math.max(nz(hh, high), high)
+    chand = hh - atrTrail*atr
+    pStop := math.max(nz(pStop, chand), chand)
+    strategy.exit("多出","多", stop=pStop)
+if strategy.position_size < 0
+    ll := math.min(nz(ll, low), low)
+    chand = ll + atrTrail*atr
+    pStop := math.min(nz(pStop, chand), chand)
+    strategy.exit("空出","空", stop=pStop)
+if flat
+    pStop := na
+    hh := na
+    ll := na
+
+// ═══ 視覺 ═══
+plot(ema200,"EMA200", color.new(color.orange,0))
+bgcolor(bearTrend and trendPure ? color.new(color.red,93) : bullTrend and trendPure ? color.new(color.green,93) : na)
+plotshape(flat and goShortSig, "空SFP", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,0),   size=size.tiny)
+plotshape(flat and goLongSig,  "多SFP", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green,0), size=size.tiny)
+plot(strategy.position_size != 0 ? pStop : na, "停損", color.new(color.fuchsia,0), style=plot.style_linebr)
+plot(strategy.position_size != 0 ? math.abs(strategy.position_size)*close/strategy.equity : na, "進場槓桿", display=display.data_window)
+plot(convS, "convS空", display=display.data_window)
+plot(convL, "convL多", display=display.data_window)
