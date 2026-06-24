@@ -1,0 +1,111 @@
+//@version=5
+strategy("放量突破 v5 · 風險定額 · 多空雙向 · 保本停損 · 2022起 — Claude", overlay=true,
+     initial_capital=1000000, default_qty_type=strategy.fixed,
+     commission_type=strategy.commission.percent, commission_value=0.055,
+     pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ── 回測時間窗 ──
+startDate = input.time(timestamp("2022-01-01 00:00 +0000"), "回測起始日期")
+inWindow  = time >= startDate
+
+// ── 參數 ──
+boxLen   = input.int(20,    "突破箱型長度")
+rvolLen  = input.int(20,    "量能均長")
+rvolMin  = input.float(1.3, "放量門檻 RVOL≥")
+emaLen   = input.int(200,   "趨勢濾網 EMA")
+atrLen   = input.int(14,    "ATR 長度")
+atrBuf   = input.float(0.25,"突破緩衝 ×ATR")
+atrTrail = input.float(3.5, "吊燈移動停利 ×ATR")
+riskPct  = input.float(5,   "每筆風險 = 當前權益的 %", tooltip="權益100萬、停損距離3%→開倉166萬(1.67x),打到停損虧5萬=5%。資金滾大自動放大倉位。")
+levCap   = input.float(5,   "槓桿上限(保險絲,倍)")
+minStopP = input.float(0.5, "停損距離下限 %(防止過緊→爆倉)") / 100.0
+useLong  = input.bool(true, "做多")
+useShort = input.bool(true, "做空(空頭保險,多頭會付保費)")
+
+// ── 保本停損 ──
+useBE    = input.bool(true,  "啟用保本停損", group="保本",
+     tooltip="把停損抬到進場價+緩衝。小賺/小賠反轉→打平而非虧損;大趨勢不受影響(早就離開進場價了)。被掃出後若再突破會自動重進。")
+beUseBars= input.bool(true,  "觸發①:K棒數確認(隔N根站上進場價)", group="保本",
+     tooltip="你的規則:進場後隔 N 根K棒收在進場價之上(確認往上),就立刻上保本。預設1=隔天確認就保本。最積極。")
+beBars   = input.int(1,      "確認K棒數 N", group="保本", minval=1)
+beArm    = input.float(1.5,  "觸發②:順向走 ×ATR 才保本", group="保本",
+     tooltip="另一條觸發:順向走過這麼多ATR也上保本。兩條觸發誰先到算誰。設很大(如99)等於關掉這條。")
+beOffset = input.float(0.15, "保本緩衝 %(蓋手續費)", group="保本") / 100.0
+
+// ── 指標 ──
+atr   = ta.rma(ta.tr(true), atrLen)
+ema   = ta.ema(close, emaLen)
+vsma  = ta.sma(volume, rvolLen)
+rvol  = vsma > 0 ? volume / vsma : na
+boxHi = ta.highest(high, boxLen)[1]
+boxLo = ta.lowest(low,  boxLen)[1]
+isV   = not na(rvol) and rvol >= rvolMin
+longSig  = useLong  and close > boxHi + atrBuf*atr and isV and close > ema
+shortSig = useShort and close < boxLo - atrBuf*atr and isV and close < ema
+
+// ── 風險定額倉位:倉位 = (風險% × 權益) ÷ 停損距離 ──
+longDist  = math.max((close - low[1]) / close,  minStopP)   // 多:前一根低點
+longQty   = math.min(strategy.equity*riskPct/100.0/(longDist*close),  levCap*strategy.equity/close)
+shortDist = math.max((high[1] - close) / close, minStopP)   // 空:前一根高點
+shortQty  = math.min(strategy.equity*riskPct/100.0/(shortDist*close), levCap*strategy.equity/close)
+
+// ── 倉位/停損狀態 ──
+var float pStop   = na
+var float hh      = na
+var float ll      = na
+var float entryPx     = na   // 進場價(保本基準)
+var int   entryBarIdx = na   // 進場K棒序號(算確認根數)
+flat   = strategy.position_size == 0
+goLong  = flat and inWindow and longSig  and longQty  > 0
+goShort = flat and inWindow and shortSig and shortQty > 0
+
+if goLong
+    strategy.entry("多", strategy.long, qty=longQty)
+    pStop := close - longDist*close
+    entryPx := close
+    entryBarIdx := bar_index
+    hh := high
+    ll := na
+else if goShort
+    strategy.entry("空", strategy.short, qty=shortQty)
+    pStop := close + shortDist*close
+    entryPx := close
+    entryBarIdx := bar_index
+    ll := low
+    hh := na
+
+// ── 吊燈移動停利 + 保本 ──
+if strategy.position_size > 0 and not goLong
+    hh := math.max(nz(hh, high), high)
+    chand = hh - atrTrail*atr
+    // 保本觸發:①隔N根收在進場價上方  或  ②順向走過 beArm×ATR
+    armBars = beUseBars and (bar_index - entryBarIdx) >= beBars and hh > entryPx
+    armATR  = hh >= entryPx + beArm*atr
+    beLevel = useBE and (armBars or armATR) ? entryPx * (1 + beOffset) : na
+    floor = na(beLevel) ? chand : math.max(chand, beLevel)
+    pStop := math.max(nz(pStop, floor), floor)
+    strategy.exit("多出", "多", stop=pStop)
+if strategy.position_size < 0 and not goShort
+    ll := math.min(nz(ll, low), low)
+    chand = ll + atrTrail*atr
+    armBars = beUseBars and (bar_index - entryBarIdx) >= beBars and ll < entryPx
+    armATR  = ll <= entryPx - beArm*atr
+    beLevel = useBE and (armBars or armATR) ? entryPx * (1 - beOffset) : na
+    ceil = na(beLevel) ? chand : math.min(chand, beLevel)
+    pStop := math.min(nz(pStop, ceil), ceil)
+    strategy.exit("空出", "空", stop=pStop)
+if flat
+    pStop := na
+    hh := na
+    ll := na
+    entryPx := na
+    entryBarIdx := na
+
+// ── 視覺 ──
+plot(ema,   "EMA200",  color.new(color.orange,0))
+plot(boxHi, "上突破線", color.new(color.blue,60), style=plot.style_stepline)
+plot(boxLo, "下突破線", color.new(color.red,60),  style=plot.style_stepline)
+plot(strategy.position_size != 0 ? pStop : na, "停損", color.new(color.fuchsia,0), style=plot.style_linebr)
+plot(strategy.position_size != 0 ? entryPx : na, "進場價", color.new(color.gray,40), style=plot.style_linebr)
+bgcolor(longSig ? color.new(color.green,90) : shortSig ? color.new(color.red,90) : na)
+plot(strategy.position_size != 0 ? math.abs(strategy.position_size)*close/strategy.equity : na, "進場槓桿", display=display.data_window)

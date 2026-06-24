@@ -1,0 +1,142 @@
+//@version=5
+// 標的資格驗證計分卡(突破主策略 + 嚴格樣本外判定)— Claude
+// 掛到任何標的的「日線」圖上 → 右上計分卡直接 PASS/FAIL。
+// 判準:全歷史切前後兩半,每半 交易≥15 且 PF≥1.3,且全期 報酬/回撤≥3 → PASS。
+// 用本圖價×本圖量(通用於股/幣)。這是「最終裁判」,凌駕篩選表的燈。
+strategy("資格驗證計分卡 — Claude", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, commission_type=strategy.commission.percent, commission_value=0.055, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ── 策略參數(同主策略) ──
+boxLen   = 10
+rvolLen  = 20
+rvolMin  = 1.3
+emaLen   = 200
+atrLen   = 14
+atrBuf   = 0.25
+atrTrail = 3.5
+riskPct  = 5.0
+levCap   = 5.0
+minStopP = 0.005
+beATR    = 3.0
+
+// ── 驗證門檻 ──
+splitDate = input.time(timestamp("2022-01-01 00:00 +0000"), "樣本外切割日", group="驗證")
+minTr  = input.int(15,   "每半最低交易數", group="驗證")
+minPF  = input.float(1.3,"每半最低 PF",   group="驗證")
+minRDD = input.float(3.0,"全期最低 報酬/回撤", group="驗證")
+posI   = input.string("中央","計分卡位置", options=["中央","右上","右下","左上","左下"], group="驗證")
+tpos = posI=="右上"?position.top_right : posI=="右下"?position.bottom_right : posI=="左上"?position.top_left : posI=="左下"?position.bottom_left : position.middle_center
+
+// ── 指標 ──
+atr   = ta.atr(atrLen)
+ema   = ta.ema(close, emaLen)
+rvol  = volume / ta.sma(volume, rvolLen)
+boxHi = ta.highest(high, boxLen)[1]
+boxLo = ta.lowest(low,  boxLen)[1]
+isV   = rvol >= rvolMin
+bearReg = ema < ema[20]
+longSig  = close > boxHi + atrBuf*atr and isV and close > ema
+shortSig = bearReg and close < boxLo - atrBuf*atr and isV and close < ema
+
+var float entryPx = na
+var float pStop   = na
+var float atrE    = na
+var float hh      = na
+var float ll      = na
+var bool  beArm   = false
+longDist  = math.max((close - low[1]) / close, minStopP)
+shortDist = math.max((high[1] - close) / close, minStopP)
+longQty   = math.min(strategy.equity*riskPct/100.0/(longDist*close), levCap*strategy.equity/close)
+shortQty  = math.min(strategy.equity*riskPct/100.0/(shortDist*close), levCap*strategy.equity/close)
+
+if strategy.position_size == 0
+    if longSig
+        strategy.entry("多", strategy.long, qty=longQty)
+        entryPx := close
+        pStop   := close - longDist*close
+        atrE    := atr
+        hh      := high
+        beArm   := false
+    else if shortSig
+        strategy.entry("空", strategy.short, qty=shortQty)
+        entryPx := close
+        pStop   := close + shortDist*close
+        atrE    := atr
+        ll      := low
+        beArm   := false
+if strategy.position_size > 0
+    hh := math.max(hh, high)
+    if not beArm and hh >= entryPx + beATR*atrE
+        beArm := true
+    pStop := math.max(nz(pStop, hh - atrTrail*atr), hh - atrTrail*atr)
+    if beArm
+        pStop := math.max(pStop, entryPx)
+    strategy.exit("多出","多", stop=pStop)
+if strategy.position_size < 0
+    ll := math.min(ll, low)
+    if not beArm and ll <= entryPx - beATR*atrE
+        beArm := true
+    pStop := math.min(nz(pStop, ll + atrTrail*atr), ll + atrTrail*atr)
+    if beArm
+        pStop := math.min(pStop, entryPx)
+    strategy.exit("空出","空", stop=pStop)
+
+plot(ema, "EMA200", color.new(color.orange,0))
+bgcolor(bearReg ? color.new(color.red,94) : na)
+
+// ── 回撤追蹤 ──
+var float eqPeak    = strategy.initial_capital
+var float maxDDseen = 0.0
+eqPeak := math.max(eqPeak, strategy.equity)
+maxDDseen := math.max(maxDDseen, (eqPeak - strategy.equity) / eqPeak * 100.0)
+
+// ── 計分卡 ──
+var table sc = table.new(tpos, 2, 9, border_width=1)
+if barstate.islast
+    float gpA = 0.0
+    float glA = 0.0
+    int   nA  = 0
+    float gpB = 0.0
+    float glB = 0.0
+    int   nB  = 0
+    if strategy.closedtrades > 0
+        for i = 0 to strategy.closedtrades - 1
+            et = strategy.closedtrades.entry_time(i)
+            p  = strategy.closedtrades.profit(i)
+            if et < splitDate
+                nA  += 1
+                gpA := gpA + (p > 0 ? p : 0.0)
+                glA := glA + (p < 0 ? -p : 0.0)
+            else
+                nB  += 1
+                gpB := gpB + (p > 0 ? p : 0.0)
+                glB := glB + (p < 0 ? -p : 0.0)
+    pfA   = glA > 0 ? gpA/glA : (gpA > 0 ? 99.0 : 0.0)
+    pfB   = glB > 0 ? gpB/glB : (gpB > 0 ? 99.0 : 0.0)
+    pfAll = strategy.grossloss > 0 ? strategy.grossprofit/strategy.grossloss : 0.0
+    netP  = strategy.netprofit / strategy.initial_capital * 100.0
+    rdd   = maxDDseen > 0 ? netP/maxDDseen : 0.0
+    passA = nA >= minTr and pfA >= minPF
+    passB = nB >= minTr and pfB >= minPF
+    passR = rdd >= minRDD
+    ok    = passA and passB and passR
+    gC = color.new(color.green,0)
+    rC = color.new(color.red,0)
+    kC = color.new(color.gray,25)
+    table.cell(sc,0,0,"資格判決",text_color=color.white,bgcolor=color.new(color.blue,0),text_size=size.large)
+    table.cell(sc,1,0,ok?"✅ PASS":"❌ FAIL",text_color=color.white,bgcolor=ok?gC:rC,text_size=size.large)
+    table.cell(sc,0,1,"全期 報酬%",text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,1,1,str.tostring(netP,"#")+"%",text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,0,2,"全期 回撤%",text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,1,2,str.tostring(maxDDseen,"#.0")+"%",text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,0,3,"全期 報酬/回撤",text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,1,3,str.tostring(rdd,"#.0"),text_color=color.white,bgcolor=passR?gC:rC,text_size=size.normal)
+    table.cell(sc,0,4,"全期 PF",text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,1,4,str.tostring(pfAll,"#.00"),text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,0,5,"前半 交易/PF",text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,1,5,str.tostring(nA)+" / "+str.tostring(pfA,"#.00"),text_color=color.white,bgcolor=passA?gC:rC,text_size=size.normal)
+    table.cell(sc,0,6,"後半 交易/PF",text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,1,6,str.tostring(nB)+" / "+str.tostring(pfB,"#.00"),text_color=color.white,bgcolor=passB?gC:rC,text_size=size.normal)
+    table.cell(sc,0,7,"總交易數",text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,1,7,str.tostring(strategy.closedtrades),text_color=color.white,bgcolor=kC,text_size=size.normal)
+    table.cell(sc,0,8,"門檻",text_color=color.white,bgcolor=kC,text_size=size.small)
+    table.cell(sc,1,8,"半≥"+str.tostring(minTr)+"筆 PF≥"+str.tostring(minPF,"#.0")+" 全RDD≥"+str.tostring(minRDD,"#.0"),text_color=color.white,bgcolor=kC,text_size=size.small)

@@ -1,0 +1,147 @@
+//@version=5
+strategy("放量突破 v5 · 聚合市場量 · CVD確認 — Claude", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, commission_type=strategy.commission.percent, commission_value=0.055, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false, max_labels_count=500)
+
+// 定案參數:箱10 · RVOL1.3 · EMA200濾網 · 風險5% · 槓桿上限5x · 做空濾網EMA200下彎 · 保本arm3.0ATR
+// 量=8家聚合;價=本圖(你下單的市場);CVD=本圖訂單流(下層分鐘,歷史有限,na放行)
+
+// ═══ 進場參數 ═══
+boxLen   = input.int(10,    "突破箱長度",       group="進場")
+rvolLen  = input.int(20,    "量能均長",         group="進場")
+rvolMin  = input.float(1.3, "放量門檻 RVOL",    group="進場", step=0.1)
+emaLen   = input.int(200,   "趨勢 EMA",         group="進場")
+atrLen   = input.int(14,    "ATR 長度",         group="進場")
+atrBuf   = input.float(0.25,"突破緩衝 ×ATR",    group="進場", step=0.05)
+atrTrail = input.float(3.5, "移動停利 ×ATR",    group="出場", step=0.5)
+
+// ═══ 成交量來源(RVOL 用哪個量)═══
+gv = "成交量來源"
+volSource = input.string("聚合市場量", "RVOL 取量", options=["本圖量","聚合市場量"], group=gv, tooltip="聚合市場量=多交易所現貨+永續加總。價格一律用本圖。")
+uBinS  = input.bool(true,  "Binance 現貨",  group=gv)
+uCbase = input.bool(true,  "Coinbase",      group=gv)
+uBybS  = input.bool(true,  "Bybit 現貨",    group=gv)
+uOKXs  = input.bool(true,  "OKX 現貨",      group=gv)
+uKrak  = input.bool(true,  "Kraken",        group=gv)
+uBinP  = input.bool(true,  "Binance 永續",  group=gv)
+uBybP  = input.bool(true,  "Bybit 永續",    group=gv)
+uOKXp  = input.bool(true,  "OKX 永續",      group=gv)
+
+// ═══ CVD 同向確認(預設關)═══
+gc = "CVD 確認"
+useCVD = input.bool(false, "啟用 CVD 同向確認", group=gc, tooltip="多單突破需該根淨買(CVD>0)、空單跌破需淨賣(CVD<0)才進場。砍假突破。CVD抓不到(老資料)時自動放行。")
+cvdTF  = input.timeframe("60", "CVD 下層取樣時間框", group=gc, tooltip="比主圖小即可。日線建議60(1h);太細(1分)歷史更短。")
+
+// ═══ 部位(風險定額,槓桿是結果不是輸入)═══
+riskPct  = input.float(5.0, "每筆風險 %（當前權益）", group="部位", step=0.5)
+levCap   = input.float(5.0, "最大槓桿上限",          group="部位", step=0.5)
+minStopP = input.float(0.5, "最小停損距離 %",        group="部位", step=0.1) / 100.0
+
+// ═══ 方向 + 牛熊濾網 ═══
+useLong  = input.bool(true,  "做多", group="方向")
+useShort = input.bool(true,  "做空", group="方向")
+shortReg = input.string("EMA200下彎", "做空濾網（牛市不做空）", options=["不濾(照舊)","EMA50<EMA200","EMA100<EMA200","EMA200下彎"], group="方向")
+
+// ═══ 保本 ═══
+beMode   = input.string("漲N個ATR後拉到成本", "保本", options=["關閉","漲N個ATR後拉到成本"], group="出場")
+beATR    = input.float(3.0, "保本觸發 ×ATR", group="出場", step=0.5)
+
+// ═══ 回測視窗(免Premium:用程式碼限定起始日,不用深度回測)═══
+gw = "回測視窗"
+useWindow = input.bool(true, "限定回測起始日(免Premium)", group=gw, tooltip="打開後只在起始日之後開倉;之前的K棒照樣暖身指標。比CVD時把起始日設到『本根CVD有數字』的位置。")
+startDate = input.time(timestamp("2025-01-01 00:00 +0000"), "回測起始日", group=gw)
+inWindow  = not useWindow or time >= startDate
+
+// ═══ 聚合市場量(價格不取,只取量)═══
+fv(sym, on) => on ? nz(request.security(sym, timeframe.period, volume, ignore_invalid_symbol=true)) : 0.0
+aggVol = fv("BINANCE:BTCUSDT", uBinS) + fv("COINBASE:BTCUSD", uCbase) + fv("BYBIT:BTCUSDT", uBybS) + fv("OKX:BTCUSDT", uOKXs) + fv("KRAKEN:XBTUSD", uKrak) + fv("BINANCE:BTCUSDT.P", uBinP) + fv("BYBIT:BTCUSDT.P", uBybP) + fv("OKX:BTCUSDT.P", uOKXp)
+volUsed = volSource == "聚合市場量" and aggVol > 0 ? aggVol : volume
+
+// ═══ CVD(本圖訂單流:下層時間框逐根分類 收>開=買/收<開=賣,加總成本根淨量差;歷史有限,na放行)═══
+ltfO = request.security_lower_tf(syminfo.tickerid, cvdTF, open)
+ltfC = request.security_lower_tf(syminfo.tickerid, cvdTF, close)
+ltfV = request.security_lower_tf(syminfo.tickerid, cvdTF, volume)
+float cvdC = na
+if array.size(ltfC) > 0
+    float d = 0.0
+    for i = 0 to array.size(ltfC) - 1
+        co = array.get(ltfO, i)
+        cc = array.get(ltfC, i)
+        vv = array.get(ltfV, i)
+        d := d + (cc > co ? vv : cc < co ? -vv : 0.0)
+    cvdC := d
+cvdLongOK  = not useCVD or na(cvdC) or cvdC > 0
+cvdShortOK = not useCVD or na(cvdC) or cvdC < 0
+
+// ═══ 指標 ═══
+atr   = ta.atr(atrLen)
+rvol  = volUsed / ta.sma(volUsed, rvolLen)
+ema   = ta.ema(close, emaLen)
+e50   = ta.ema(close, 50)
+e100  = ta.ema(close, 100)
+boxHi = ta.highest(high, boxLen)[1]
+boxLo = ta.lowest(low,  boxLen)[1]
+isV   = rvol >= rvolMin
+
+// ═══ 牛熊濾網(純量價)═══
+bearReg = shortReg == "EMA50<EMA200" ? e50 < ema : shortReg == "EMA100<EMA200" ? e100 < ema : shortReg == "EMA200下彎" ? ema < ema[20] : true
+
+longSig  = useLong  and inWindow and close > boxHi + atrBuf * atr and isV and close > ema and cvdLongOK
+shortSig = useShort and inWindow and bearReg and close < boxLo - atrBuf * atr and isV and close < ema and cvdShortOK
+
+// ═══ 狀態(跨K棒保存)═══
+var float entryPx = na
+var float pStop   = na
+var float atrE    = na
+var float hh      = na
+var float ll      = na
+var bool  beArm   = false
+
+// ═══ 進場部位大小:倉位 =(風險% × 權益)÷ 停損距離,封頂 levCap ═══
+longDist  = math.max((close - low[1]) / close, minStopP)
+shortDist = math.max((high[1] - close) / close, minStopP)
+longQty   = math.min(strategy.equity * riskPct / 100.0 / (longDist  * close), levCap * strategy.equity / close)
+shortQty  = math.min(strategy.equity * riskPct / 100.0 / (shortDist * close), levCap * strategy.equity / close)
+
+// ═══ 進場(只在空手時)═══
+if strategy.position_size == 0
+    if longSig
+        strategy.entry("多", strategy.long, qty=longQty)
+        entryPx := close
+        pStop   := close - longDist * close
+        atrE    := atr
+        hh      := high
+        beArm   := false
+    else if shortSig
+        strategy.entry("空", strategy.short, qty=shortQty)
+        entryPx := close
+        pStop   := close + shortDist * close
+        atrE    := atr
+        ll      := low
+        beArm   := false
+
+// ═══ 多單管理:吊燈移動停利 +(可選)保本 ═══
+if strategy.position_size > 0
+    hh := math.max(hh, high)
+    if beMode == "漲N個ATR後拉到成本" and not beArm and hh >= entryPx + beATR * atrE
+        beArm := true
+    pStop := math.max(nz(pStop, hh - atrTrail * atr), hh - atrTrail * atr)
+    if beArm
+        pStop := math.max(pStop, entryPx)
+    strategy.exit("多出", "多", stop=pStop)
+
+// ═══ 空單管理 ═══
+if strategy.position_size < 0
+    ll := math.min(ll, low)
+    if beMode == "漲N個ATR後拉到成本" and not beArm and ll <= entryPx - beATR * atrE
+        beArm := true
+    pStop := math.min(nz(pStop, ll + atrTrail * atr), ll + atrTrail * atr)
+    if beArm
+        pStop := math.min(pStop, entryPx)
+    strategy.exit("空出", "空", stop=pStop)
+
+// ═══ 視覺化 ═══
+plot(ema, "EMA200", color.new(color.orange, 0))
+plot(e50, "EMA50",  color.new(color.aqua, 55))
+bgcolor(bearReg ? color.new(color.red, 92) : na, title="可做空區（熊）")
+plot(strategy.position_size != 0 ? pStop : na, "目前停損", color.new(color.fuchsia, 0), style=plot.style_linebr)
+plot(rvol, "RVOL(取量)", display=display.data_window)
+plot(cvdC, "本根CVD", display=display.data_window)

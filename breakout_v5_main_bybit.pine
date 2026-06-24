@@ -1,0 +1,176 @@
+//@version=5
+// ★ 主策略 ★ 放量突破 v5 · 本圖價×幣安量(Bybit 下單版)— Claude
+// 價格全用本圖(=你下單的 Bybit);放量判定借幣安現貨量。定案參數見 README / 標的選擇.md。
+strategy("放量突破 v5 · 本圖價×幣安量（Bybit 下單版）— Claude", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, commission_type=strategy.commission.percent, commission_value=0.055, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false, max_labels_count=500)
+
+// ═══ 進場參數 ═══
+boxLen   = input.int(10,    "突破箱長度",       group="進場")
+rvolLen  = input.int(20,    "量能均長",         group="進場")
+rvolMin  = input.float(1.3, "放量門檻 RVOL",    group="進場", step=0.1)
+emaLen   = input.int(200,   "趨勢 EMA",         group="進場")
+atrLen   = input.int(14,    "ATR 長度",         group="進場")
+atrBuf   = input.float(0.25,"突破緩衝 ×ATR",    group="進場", step=0.05)
+atrTrail = input.float(3.5, "移動停利 ×ATR",    group="出場", step=0.5)
+
+// ═══ 部位 ═══
+riskPct  = input.float(5.0, "每筆風險 %（當前權益）", group="部位", step=0.5)
+levCap   = input.float(5.0, "最大槓桿上限",          group="部位", step=0.5)
+minStopP = input.float(0.5, "最小停損距離 %",        group="部位", step=0.1) / 100.0
+
+// ═══ 方向 + 牛熊濾網 ═══
+useLong  = input.bool(true,  "做多", group="方向")
+useShort = input.bool(true,  "做空", group="方向")
+shortReg = input.string("EMA200下彎", "做空濾網（牛市不做空）", options=["不濾(照舊)","EMA50<EMA200","EMA100<EMA200","EMA200下彎"], group="方向")
+
+// ═══ 保本 ═══
+beMode   = input.string("漲N個ATR後拉到成本", "保本", options=["關閉","漲N個ATR後拉到成本"], group="出場")
+beATR    = input.float(3.0, "保本觸發 ×ATR", group="出場", step=0.5)
+
+// ═══ 顯示 ═══
+showLab  = input.bool(true, "圖上標註：進場價 / 倉位$ / 本金", group="顯示")
+
+// ═══ 指標(價格全用本圖 = 你下單的 Bybit) ═══
+atr   = ta.atr(atrLen)
+ema   = ta.ema(close, emaLen)
+e50   = ta.ema(close, 50)
+e100  = ta.ema(close, 100)
+boxHi = ta.highest(high, boxLen)[1]
+boxLo = ta.lowest(low,  boxLen)[1]
+
+// ═══ RVOL：價用本圖(Bybit)，放量判定借「幣安現貨量」═══
+volSym  = input.symbol("BINANCE:BTCUSDT", "放量判定的量來源（預設幣安現貨）", group="進場")
+rvolBin = request.security(volSym, timeframe.period, volume / ta.sma(volume, rvolLen), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+binOK   = not na(rvolBin)
+rvol    = binOK ? rvolBin : (volume / ta.sma(volume, rvolLen))
+isV     = rvol >= rvolMin
+
+// ═══ 牛熊濾網 ═══
+bearReg = shortReg == "EMA50<EMA200" ? e50 < ema : shortReg == "EMA100<EMA200" ? e100 < ema : shortReg == "EMA200下彎" ? ema < ema[20] : true
+
+longSig  = useLong  and close > boxHi + atrBuf * atr and isV and close > ema
+shortSig = useShort and bearReg and close < boxLo - atrBuf * atr and isV and close < ema
+
+// ═══ 狀態 ═══
+var float entryPx = na
+var float pStop   = na
+var float atrE    = na
+var float hh      = na
+var float ll      = na
+var bool  beArm   = false
+var float entryUSD = na
+
+// ═══ 進場部位大小 ═══
+longDist  = math.max((close - low[1]) / close, minStopP)
+shortDist = math.max((high[1] - close) / close, minStopP)
+longQty   = math.min(strategy.equity * riskPct / 100.0 / (longDist  * close), levCap * strategy.equity / close)
+shortQty  = math.min(strategy.equity * riskPct / 100.0 / (shortDist * close), levCap * strategy.equity / close)
+
+// ═══ 進場(只在空手時) ═══
+if strategy.position_size == 0
+    if longSig
+        strategy.entry("多", strategy.long, qty=longQty)
+        entryPx  := close
+        pStop    := close - longDist * close
+        atrE     := atr
+        hh       := high
+        beArm    := false
+        entryUSD := longQty * close
+        if showLab
+            label.new(bar_index, low, "進場 " + str.tostring(close, format.mintick) + "\n倉位 $" + str.tostring(entryUSD, "#,###") + "\n(本金 $" + str.tostring(strategy.equity, "#,###") + ")", yloc=yloc.price, style=label.style_label_up, color=color.new(color.teal, 0), textcolor=color.white, size=size.small)
+    else if shortSig
+        strategy.entry("空", strategy.short, qty=shortQty)
+        entryPx  := close
+        pStop    := close + shortDist * close
+        atrE     := atr
+        ll       := low
+        beArm    := false
+        entryUSD := shortQty * close
+        if showLab
+            label.new(bar_index, high, "進場 " + str.tostring(close, format.mintick) + "\n倉位 $" + str.tostring(entryUSD, "#,###") + "\n(本金 $" + str.tostring(strategy.equity, "#,###") + ")", yloc=yloc.price, style=label.style_label_down, color=color.new(color.maroon, 0), textcolor=color.white, size=size.small)
+
+// ═══ 多單管理 ═══
+if strategy.position_size > 0
+    hh := math.max(hh, high)
+    if beMode == "漲N個ATR後拉到成本" and not beArm and hh >= entryPx + beATR * atrE
+        beArm := true
+    pStop := math.max(nz(pStop, hh - atrTrail * atr), hh - atrTrail * atr)
+    if beArm
+        pStop := math.max(pStop, entryPx)
+    strategy.exit("多出", "多", stop=pStop)
+
+// ═══ 空單管理 ═══
+if strategy.position_size < 0
+    ll := math.min(ll, low)
+    if beMode == "漲N個ATR後拉到成本" and not beArm and ll <= entryPx - beATR * atrE
+        beArm := true
+    pStop := math.min(nz(pStop, ll + atrTrail * atr), ll + atrTrail * atr)
+    if beArm
+        pStop := math.min(pStop, entryPx)
+    strategy.exit("空出", "空", stop=pStop)
+
+// ═══ 視覺化 ═══
+plot(ema, "EMA200", color.new(color.orange, 0))
+bgcolor(bearReg ? color.new(color.red, 94) : na, title="可做空區（熊）")
+plot(strategy.position_size != 0 ? pStop : na, "移動止損／止盈", color.new(color.fuchsia, 0), style=plot.style_linebr, linewidth=2)
+plot(rvol, "RVOL(幣安現貨)", display=display.data_window)
+plot(binOK ? 1 : 0, "幣安量在用嗎(1=是/0=退回本圖)", display=display.data_window)
+
+// ═══════════ 健康儀表板(圖右上;隨時看這標的這策略健不健康)═══════════
+showHealth = input.bool(true, "顯示健康儀表板", group="健康")
+rollN      = input.int(25,  "滾動PF:最近N筆", group="健康", minval=5)
+volLB      = input.int(500, "波動度百分位回看", group="健康")
+
+var float eqPeak     = strategy.initial_capital
+var int   drySpell   = 0
+var int   longestDry = 0
+var float maxDDseen  = 0.0
+eqNow = strategy.equity
+if eqNow >= eqPeak
+    eqPeak := eqNow
+    drySpell := 0
+else
+    drySpell += 1
+longestDry := math.max(longestDry, drySpell)
+curDD = (eqPeak - eqNow) / eqPeak * 100.0
+maxDDseen := math.max(maxDDseen, curDD)
+volr   = atr / close
+volPct = ta.percentrank(volr, volLB)
+
+f_rollpf() =>
+    nct = strategy.closedtrades
+    float gp = 0.0
+    float gl = 0.0
+    if nct > 0
+        for i = math.max(0, nct - rollN) to nct - 1
+            p = strategy.closedtrades.profit(i)
+            gp := gp + (p > 0 ? p : 0.0)
+            gl := gl + (p < 0 ? -p : 0.0)
+    gl > 0 ? gp / gl : (gp > 0 ? 99.0 : 0.0)
+rollPF = f_rollpf()
+
+ddRed  = maxDDseen > 0 and curDD >= maxDDseen * 0.99
+ddYel  = maxDDseen > 0 and curDD >= maxDDseen * 0.7 and not ddRed
+dryRed = longestDry > 0 and drySpell > 0 and drySpell >= longestDry
+dryYel = longestDry > 0 and drySpell >= longestDry * 0.7 and not dryRed
+pfRed  = strategy.closedtrades >= rollN and rollPF < 1.0
+pfYel  = strategy.closedtrades >= rollN and rollPF < 1.5 and not pfRed
+vRed   = not na(volPct) and volPct < 20
+vYel   = not na(volPct) and volPct < 40 and not vRed
+anyRed = ddRed or dryRed or pfRed or vRed
+anyYel = ddYel or dryYel or pfYel or vYel
+verdict = anyRed ? "🔴 警戒" : anyYel ? "🟡 觀察" : "🟢 健康"
+
+var table ht = table.new(position.top_right, 2, 6, border_width=1)
+if showHealth and barstate.islast
+    table.cell(ht,0,0,"策略健康",text_color=color.white,bgcolor=color.new(color.blue,0),text_size=size.normal)
+    table.cell(ht,1,0,verdict,text_color=color.white,bgcolor=anyRed?color.new(color.red,0):anyYel?color.new(color.orange,0):color.new(color.green,0),text_size=size.normal)
+    table.cell(ht,0,1,"目前/歷來回撤%",text_color=color.white,bgcolor=color.new(color.gray,30),text_size=size.small)
+    table.cell(ht,1,1,str.tostring(curDD,"#.0")+" / "+str.tostring(maxDDseen,"#.0"),text_color=color.white,bgcolor=ddRed?color.new(color.red,0):ddYel?color.new(color.orange,0):color.new(color.green,0),text_size=size.small)
+    table.cell(ht,0,2,"乾旱/最長(根)",text_color=color.white,bgcolor=color.new(color.gray,30),text_size=size.small)
+    table.cell(ht,1,2,str.tostring(drySpell)+" / "+str.tostring(longestDry),text_color=color.white,bgcolor=dryRed?color.new(color.red,0):dryYel?color.new(color.orange,0):color.new(color.green,0),text_size=size.small)
+    table.cell(ht,0,3,"滾動"+str.tostring(rollN)+"筆PF",text_color=color.white,bgcolor=color.new(color.gray,30),text_size=size.small)
+    table.cell(ht,1,3,str.tostring(rollPF,"#.00"),text_color=color.white,bgcolor=pfRed?color.new(color.red,0):pfYel?color.new(color.orange,0):color.new(color.green,0),text_size=size.small)
+    table.cell(ht,0,4,"波動度百分位",text_color=color.white,bgcolor=color.new(color.gray,30),text_size=size.small)
+    table.cell(ht,1,4,str.tostring(volPct,"#")+"%",text_color=color.white,bgcolor=vRed?color.new(color.red,0):vYel?color.new(color.orange,0):color.new(color.green,0),text_size=size.small)
+    table.cell(ht,0,5,"總交易數",text_color=color.white,bgcolor=color.new(color.gray,30),text_size=size.small)
+    table.cell(ht,1,5,str.tostring(strategy.closedtrades),text_color=color.white,bgcolor=color.new(color.gray,30),text_size=size.small)
