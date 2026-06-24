@@ -18,10 +18,12 @@ try:
 except ImportError:
     sys.exit("請先安裝:pip install yfinance")
 
-# ── 標的清單(yfinance 代碼)三組前10大,不含大盤/ETF ──
+# ── 標的清單(yfinance 代碼)──
 ASSETS = {
     "加密前10大": ["BTC-USD","ETH-USD","BNB-USD","SOL-USD","XRP-USD","ADA-USD","DOGE-USD","AVAX-USD","TRX-USD","LINK-USD"],
+    "美股大盤":   ["^GSPC","^IXIC"],
     "美股前10大": ["NVDA","AAPL","MSFT","AMZN","GOOGL","META","TSLA","AVGO","AMD","NFLX"],
+    "台股大盤":   ["^TWII","0050.TW"],
     "台股前10大": ["2330.TW","2317.TW","2454.TW","2308.TW","2382.TW","2891.TW","2412.TW","2881.TW","3711.TW","2603.TW"],
 }
 
