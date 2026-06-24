@@ -1,0 +1,203 @@
+//@version=5
+// 逐年走查 Walk-Forward(單一標的詳細表)— Claude
+// 掛在 BTC(或任何標的)日線圖。把每一年單獨拿出來,用同一套寫死的「放量突破」規則跑,
+// 顯示該年 交易數 / PF / 報酬%,紅黃綠標色。最底下給總判決:綠燈續用 / 該停。
+// 判讀:看「連續性」不是看單一數字。連續 2 年該年 PF<1 → 邊際在死,該停。
+indicator("逐年走查 Walk-Forward — Claude", overlay=true)
+
+boxLen   = 10
+rvolLen  = 20
+rvolMin  = 1.3
+emaLen   = 200
+atrLen   = 14
+atrBuf   = 0.25
+atrTrail = 3.5
+riskPct  = 5.0
+levCap   = 5.0
+minStopP = 0.005
+beATR    = 3.0
+COMM     = 0.00055
+INIT     = 1000000.0
+
+K       = input.int(5,    "看最近幾年", group="判準")
+yrPFok  = input.float(1.0,"該年算過關的最低 PF", group="判準")
+minPF   = input.float(1.3,"全期最低 PF", group="判準")
+minRDD  = input.float(3.0,"全期最低 報酬/回撤", group="判準")
+minTr   = input.int(20,   "全期最低交易數", group="判準")
+posI    = input.string("右上","表格位置", options=["右上","右下","左上","左下","中央"], group="顯示")
+tpos = posI=="右下"?position.bottom_right : posI=="左上"?position.top_left : posI=="左下"?position.bottom_left : posI=="中央"?position.middle_center : position.top_right
+
+// ── 指標 ──
+ema200 = ta.ema(close, emaLen)
+atr    = ta.atr(atrLen)
+vsma   = ta.sma(volume, rvolLen)
+rvol   = vsma > 0 ? volume / vsma : 0.0
+hh10   = ta.highest(high, boxLen)[1]
+ll10   = ta.lowest(low,  boxLen)[1]
+
+// ── 手動回測(指標內自己模擬資金) ──
+var float cash  = INIT
+var int   pos   = 0
+var float qty   = 0.0
+var float entry = 0.0
+var float pst   = 0.0
+var float atrE  = 0.0
+var float hh    = 0.0
+var float ll    = 0.0
+var bool  beArm = false
+var float etime = 0.0
+var float peak  = INIT
+var float maxdd = 0.0
+var float gpAll = 0.0
+var float glAll = 0.0
+var int   nAll  = 0
+var array<float> plArr = array.new_float(0)
+var array<float> etArr = array.new_float(0)
+
+if pos != 0 and not na(atr)
+    float ex = na
+    if pos > 0
+        if low <= pst
+            ex := open < pst ? open : pst
+    else
+        if high >= pst
+            ex := open > pst ? open : pst
+    if not na(ex)
+        float pnl = pos > 0 ? (ex - entry) * qty : (entry - ex) * qty
+        pnl := pnl - COMM * qty * (entry + ex)
+        cash := cash + pnl
+        nAll  := nAll + 1
+        gpAll := gpAll + (pnl > 0 ? pnl : 0.0)
+        glAll := glAll + (pnl < 0 ? -pnl : 0.0)
+        array.push(plArr, pnl)
+        array.push(etArr, etime)
+        pos := 0
+    else
+        if pos > 0
+            hh := math.max(hh, high)
+            if not beArm and hh >= entry + beATR * atrE
+                beArm := true
+            pst := math.max(pst, hh - atrTrail * atr)
+            if beArm
+                pst := math.max(pst, entry)
+        else
+            ll := math.min(ll, low)
+            if not beArm and ll <= entry - beATR * atrE
+                beArm := true
+            pst := math.min(pst, ll + atrTrail * atr)
+            if beArm
+                pst := math.min(pst, entry)
+
+bool canTrade = pos == 0 and bar_index > emaLen and not na(atr) and not na(ema200[20]) and not na(hh10)
+if canTrade
+    bool bear   = ema200 < ema200[20]
+    bool longS  = close > hh10 + atrBuf * atr and rvol >= rvolMin and close > ema200
+    bool shortS = bear and close < ll10 - atrBuf * atr and rvol >= rvolMin and close < ema200
+    if longS
+        float d = math.max((close - low[1]) / close, minStopP)
+        qty   := math.min(cash * riskPct / 100.0 / (d * close), levCap * cash / close)
+        pos   := 1
+        entry := close
+        pst   := close - d * close
+        atrE  := atr
+        hh    := high
+        beArm := false
+        etime := time
+    else if shortS
+        float d = math.max((high[1] - close) / close, minStopP)
+        qty   := math.min(cash * riskPct / 100.0 / (d * close), levCap * cash / close)
+        pos   := -1
+        entry := close
+        pst   := close + d * close
+        atrE  := atr
+        ll    := low
+        beArm := false
+        etime := time
+
+float mtm = cash + (pos == 0 ? 0.0 : pos > 0 ? (close - entry) * qty : (entry - close) * qty)
+peak  := math.max(peak, mtm)
+maxdd := math.max(maxdd, (peak - mtm) / peak * 100.0)
+
+plot(ema200, "EMA200", color.new(color.orange, 0))
+
+// ── 逐年表 ──
+var table tb = table.new(tpos, 4, 20, border_width=1, frame_width=1, frame_color=color.gray)
+gC = color.new(color.green, 0)
+yC = color.new(color.orange, 0)
+rC = color.new(color.red, 0)
+kC = color.new(color.gray, 20)
+hC = color.new(color.blue, 0)
+
+if barstate.islast
+    table.clear(tb, 0, 0, 3, 19)
+    table.cell(tb, 0, 0, "年", text_color=color.white, bgcolor=hC, text_size=size.normal)
+    table.cell(tb, 1, 0, "筆", text_color=color.white, bgcolor=hC, text_size=size.normal)
+    table.cell(tb, 2, 0, "PF", text_color=color.white, bgcolor=hC, text_size=size.normal)
+    table.cell(tb, 3, 0, "報酬%", text_color=color.white, bgcolor=hC, text_size=size.normal)
+    int sz = array.size(plArr)
+    int minY = 9999
+    int maxY = 0
+    if sz > 0
+        for i = 0 to sz - 1
+            int yy = year(int(array.get(etArr, i)))
+            minY := math.min(minY, yy)
+            maxY := math.max(maxY, yy)
+    int row = 1
+    int passRecent = 0
+    int availRecent = 0
+    bool lastFail = false
+    bool prevFail = false
+    bool last2fail = false
+    if sz > 0
+        for y = minY to maxY
+            float ygp = 0.0
+            float ygl = 0.0
+            int   ycn = 0
+            float ynet = 0.0
+            for i = 0 to sz - 1
+                if year(int(array.get(etArr, i))) == y
+                    float p = array.get(plArr, i)
+                    ycn  := ycn + 1
+                    ynet := ynet + p
+                    ygp  := ygp + (p > 0 ? p : 0.0)
+                    ygl  := ygl + (p < 0 ? -p : 0.0)
+            float ypf = ygl > 0 ? ygp / ygl : (ygp > 0 ? 99.0 : 0.0)
+            float yret = ynet / INIT * 100.0
+            bool yok = ycn > 0 and ypf >= yrPFok
+            color yb = ycn == 0 ? kC : ypf >= minPF ? gC : ypf >= yrPFok ? yC : rC
+            // 近 K 年統計
+            if y > maxY - K and ycn > 0
+                availRecent := availRecent + 1
+                if yok
+                    passRecent := passRecent + 1
+            if y > maxY - 2 and ycn > 0
+                prevFail := lastFail
+                lastFail := not yok
+            table.cell(tb, 0, row, str.tostring(y), text_color=color.white, bgcolor=kC, text_size=size.normal)
+            table.cell(tb, 1, row, str.tostring(ycn), text_color=color.white, bgcolor=kC, text_size=size.normal)
+            table.cell(tb, 2, row, ycn == 0 ? "—" : str.tostring(ypf, "#.00"), text_color=color.white, bgcolor=yb, text_size=size.normal)
+            table.cell(tb, 3, row, ycn == 0 ? "—" : str.tostring(yret, "#") + "%", text_color=color.white, bgcolor=yb, text_size=size.normal)
+            row := row + 1
+        last2fail := prevFail and lastFail
+    // 全期
+    float pfFull = glAll > 0 ? gpAll / glAll : (gpAll > 0 ? 99.0 : 0.0)
+    float netP   = (cash - INIT) / INIT * 100.0
+    float rdd    = maxdd > 0 ? netP / maxdd : 0.0
+    bool baseOK  = nAll >= minTr and pfFull >= minPF and rdd >= minRDD
+    bool consOK  = availRecent > 0 and passRecent * 1.0 / availRecent >= 0.6
+    int verdict  = (baseOK and consOK and not last2fail) ? 2 : ((baseOK and not last2fail) ? 1 : 0)
+    string vtxt  = verdict == 2 ? "🟢 續用" : verdict == 1 ? "🟡 觀察" : "🔴 該停"
+    color  vc    = verdict == 2 ? gC : verdict == 1 ? yC : rC
+    table.cell(tb, 0, row, "近"+str.tostring(K)+"年過", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 1, row, str.tostring(passRecent)+"/"+str.tostring(availRecent), text_color=color.white, bgcolor=consOK?gC:rC, text_size=size.small)
+    table.cell(tb, 2, row, "全PF", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 3, row, str.tostring(pfFull,"#.00"), text_color=color.white, bgcolor=pfFull>=minPF?gC:rC, text_size=size.small)
+    row := row + 1
+    table.cell(tb, 0, row, "全RDD", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 1, row, str.tostring(rdd,"#.0"), text_color=color.white, bgcolor=rdd>=minRDD?gC:rC, text_size=size.small)
+    table.cell(tb, 2, row, "連2年虧", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 3, row, last2fail?"是":"否", text_color=color.white, bgcolor=last2fail?rC:gC, text_size=size.small)
+    row := row + 1
+    table.cell(tb, 0, row, "判決", text_color=color.white, bgcolor=hC, text_size=size.large)
+    table.cell(tb, 1, row, vtxt, text_color=color.white, bgcolor=vc, text_size=size.large)
+    table.merge_cells(tb, 1, row, 3, row)
