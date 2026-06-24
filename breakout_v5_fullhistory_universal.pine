@@ -1,0 +1,206 @@
+//@version=5
+strategy("放量突破 v5 · 全歷史回測（量來源自動）— Claude", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, commission_type=strategy.commission.percent, commission_value=0.055, pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false, max_labels_count=500, max_lines_count=500)
+// ↑ 全歷史回測基準資金 initial_capital=1000000；報酬%/回撤%/PF 與此數字無關，只影響標籤上的絕對金額
+
+// ═══ 進場參數 ═══
+boxLen   = input.int(10,    "突破箱長度",       group="進場")
+rvolLen  = input.int(20,    "量能均長",         group="進場")
+rvolMin  = input.float(1.3, "放量門檻 RVOL",    group="進場", step=0.1)
+emaLen   = input.int(200,   "趨勢 EMA",         group="進場")
+atrLen   = input.int(14,    "ATR 長度",         group="進場")
+atrBuf   = input.float(0.25,"突破緩衝 ×ATR",    group="進場", step=0.05)
+atrTrail = input.float(3.5, "移動停利 ×ATR",    group="出場", step=0.5)
+
+// ═══ 部位 ═══
+riskPct  = input.float(10.0, "每筆風險 %（當前權益）", group="部位", step=0.5)
+levCap   = input.float(5.0, "最大槓桿上限",          group="部位", step=0.5)
+minStopP = input.float(0.5, "最小停損距離 %",        group="部位", step=0.1) / 100.0
+
+// ═══ 方向 + 牛熊濾網 ═══
+useLong  = input.bool(true,  "做多", group="方向")
+useShort = input.bool(true,  "做空", group="方向")
+shortReg = input.string("EMA200下彎", "做空濾網（牛市不做空）", options=["不濾(照舊)","EMA50<EMA200","EMA100<EMA200","EMA200下彎"], group="方向")
+
+// ═══ 保本 ═══
+beMode   = input.string("漲N個ATR後拉到成本", "保本", options=["關閉","漲N個ATR後拉到成本"], group="出場")
+beATR    = input.float(3.0, "保本觸發 ×ATR", group="出場", step=0.5)
+
+// ═══ 起算日（全歷史：2017/1/1＝吃滿全圖；要只看某段就改這三個）═══
+syY = input.int(2017, "起算-年", group="起算日")
+syM = input.int(1,    "起算-月", group="起算日", minval=1, maxval=12)
+syD = input.int(1,    "起算-日", group="起算日", minval=1, maxval=31)
+realStart = timestamp(syY, syM, syD, 0, 0)
+
+// ═══ 顯示 ═══
+showLab  = input.bool(true, "資訊框（拉到空白處＋箭頭）", group="顯示")
+detail   = input.string("完整", "詳細度", options=["完整","精簡"], group="顯示")
+showPanel= input.bool(true, "右上角固定面板", group="顯示")
+offEntry = input.float(6.0, "進場框上移 ×ATR（負數=往下）", group="顯示", step=0.5)
+offExit  = input.float(6.0, "出場框下移 ×ATR（負數=往上）", group="顯示", step=0.5)
+laneStep = input.float(4.0, "密集時分層間距 ×ATR", group="顯示", step=0.5)
+lanes    = input.int(3,     "分層數",             group="顯示", minval=1)
+clusterW = input.int(15,    "多近算密集（根K）",   group="顯示")
+
+// ═══ 指標(價格全用本圖 = 你下單的 Bybit) ═══
+atr   = ta.atr(atrLen)
+ema   = ta.ema(close, emaLen)
+e50   = ta.ema(close, 50)
+e100  = ta.ema(close, 100)
+boxHi = ta.highest(high, boxLen)[1]
+boxLo = ta.lowest(low,  boxLen)[1]
+
+// ═══ RVOL：量來源自動切換（BTC 借幣安現貨量，其他標的一律用本圖自己的量）═══
+volMode = input.string("自動：BTC借幣安量／其他用本圖量", "RVOL 量來源", options=["自動：BTC借幣安量／其他用本圖量","強制借用下方來源","一律用本圖自己的量"], group="進場")
+volSym  = input.symbol("BINANCE:BTCUSDT", "借量來源（自動模式下只有 BTC 圖會用到）", group="進場")
+isBTC     = str.contains(syminfo.ticker, "BTC")
+useBorrow = volMode == "強制借用下方來源" or (volMode == "自動：BTC借幣安量／其他用本圖量" and isBTC)
+rvolBin = request.security(volSym, timeframe.period, volume / ta.sma(volume, rvolLen), lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true)
+ownRvol = volume / ta.sma(volume, rvolLen)
+binOK   = useBorrow and not na(rvolBin)
+rvol    = binOK ? rvolBin : ownRvol
+isV     = rvol >= rvolMin
+
+// ═══ 牛熊濾網 ═══
+bearReg = shortReg == "EMA50<EMA200" ? e50 < ema : shortReg == "EMA100<EMA200" ? e100 < ema : shortReg == "EMA200下彎" ? ema < ema[20] : true
+
+// ═══ 訊號（加一道「起算日以後才開單」的閘門）═══
+longSig  = useLong  and time >= realStart and close > boxHi + atrBuf * atr and isV and close > ema
+shortSig = useShort and time >= realStart and bearReg and close < boxLo - atrBuf * atr and isV and close < ema
+
+// ═══ 狀態 ═══
+var float entryPx  = na
+var float pStop    = na
+var float atrE     = na
+var float hh       = na
+var float ll       = na
+var bool  beArm    = false
+var float entryUSD = na
+var int   lastEntBar = -100000
+var int   entLane    = 0
+var int   lastExBar  = -100000
+var int   exLane     = 0
+
+// ═══ 進場部位大小 ═══
+longDist  = math.max((close - low[1]) / close, minStopP)
+shortDist = math.max((high[1] - close) / close, minStopP)
+longQty   = math.min(strategy.equity * riskPct / 100.0 / (longDist  * close), levCap * strategy.equity / close)
+shortQty  = math.min(strategy.equity * riskPct / 100.0 / (shortDist * close), levCap * strategy.equity / close)
+
+// ═══ 進場 ═══
+if strategy.position_size == 0
+    if longSig
+        strategy.entry("多", strategy.long, qty=longQty)
+        entryPx  := close
+        pStop    := close - longDist * close
+        atrE     := atr
+        hh       := high
+        beArm    := false
+        entryUSD := longQty * close
+        if showLab
+            useFull = detail == "完整"
+            if useFull
+                entLane  := (bar_index - lastEntBar < clusterW) ? (entLane + 1) % lanes : 0
+                lastEntBar := bar_index
+                eY  = high + (offEntry + entLane * laneStep) * atr
+                txt = "▲ 多單進場\n開倉價 $" + str.tostring(close, format.mintick) + "\n開倉價值 $" + str.tostring(entryUSD, "#,###") + "（" + str.tostring(longQty, "#.###") + " 顆）\n止損 $" + str.tostring(pStop, format.mintick) + "（虧 $" + str.tostring(longDist * close * longQty, "#,###") + "）\n錢包餘額 $" + str.tostring(strategy.equity, "#,###")
+                line.new(bar_index, high, bar_index, eY, color=color.new(color.teal, 30), width=1, style=line.style_dashed)
+                label.new(bar_index, eY, txt, style=label.style_label_down, color=color.new(color.teal, 0), textcolor=color.white, size=size.small)
+            else
+                label.new(bar_index, low, "▲ 進 $" + str.tostring(close, format.mintick), yloc=yloc.belowbar, style=label.style_label_up, color=color.new(color.teal, 0), textcolor=color.white, size=size.tiny)
+    else if shortSig
+        strategy.entry("空", strategy.short, qty=shortQty)
+        entryPx  := close
+        pStop    := close + shortDist * close
+        atrE     := atr
+        ll       := low
+        beArm    := false
+        entryUSD := shortQty * close
+        if showLab
+            useFull = detail == "完整"
+            if useFull
+                entLane  := (bar_index - lastEntBar < clusterW) ? (entLane + 1) % lanes : 0
+                lastEntBar := bar_index
+                eY  = high + (offEntry + entLane * laneStep) * atr
+                txt = "▼ 空單進場\n開倉價 $" + str.tostring(close, format.mintick) + "\n開倉價值 $" + str.tostring(entryUSD, "#,###") + "（" + str.tostring(shortQty, "#.###") + " 顆）\n止損 $" + str.tostring(pStop, format.mintick) + "（虧 $" + str.tostring(shortDist * close * shortQty, "#,###") + "）\n錢包餘額 $" + str.tostring(strategy.equity, "#,###")
+                line.new(bar_index, high, bar_index, eY, color=color.new(color.maroon, 30), width=1, style=line.style_dashed)
+                label.new(bar_index, eY, txt, style=label.style_label_down, color=color.new(color.maroon, 0), textcolor=color.white, size=size.small)
+            else
+                label.new(bar_index, high, "▼ 進 $" + str.tostring(close, format.mintick), yloc=yloc.abovebar, style=label.style_label_down, color=color.new(color.maroon, 0), textcolor=color.white, size=size.tiny)
+
+// ═══ 多單管理 ═══
+if strategy.position_size > 0
+    hh := math.max(hh, high)
+    if beMode == "漲N個ATR後拉到成本" and not beArm and hh >= entryPx + beATR * atrE
+        beArm := true
+    pStop := math.max(nz(pStop, hh - atrTrail * atr), hh - atrTrail * atr)
+    if beArm
+        pStop := math.max(pStop, entryPx)
+    strategy.exit("多出", "多", stop=pStop)
+
+// ═══ 空單管理 ═══
+if strategy.position_size < 0
+    ll := math.min(ll, low)
+    if beMode == "漲N個ATR後拉到成本" and not beArm and ll <= entryPx - beATR * atrE
+        beArm := true
+    pStop := math.min(nz(pStop, ll + atrTrail * atr), ll + atrTrail * atr)
+    if beArm
+        pStop := math.min(pStop, entryPx)
+    strategy.exit("空出", "空", stop=pStop)
+
+// ═══ 出場 ═══
+var int lastClosed = 0
+if showLab and strategy.closedtrades > lastClosed
+    for k = lastClosed to strategy.closedtrades - 1
+        xpx     = strategy.closedtrades.exit_price(k)
+        pnl     = strategy.closedtrades.profit(k)
+        xbar    = strategy.closedtrades.exit_bar_index(k)
+        coinQty = math.abs(strategy.closedtrades.size(k))
+        posUSD  = coinQty * strategy.closedtrades.entry_price(k)
+        win     = pnl >= 0
+        eqAfter = strategy.equity
+        eqBefore= eqAfter - pnl
+        roe     = eqBefore != 0 ? pnl / eqBefore * 100 : 0.0
+        roeStr  = (win ? "+" : "") + str.tostring(roe, "#.0") + "%"
+        col     = win ? color.new(color.green, 0) : color.new(color.red, 0)
+        useFull = detail == "完整"
+        if useFull
+            exLane  := (xbar - lastExBar < clusterW) ? (exLane + 1) % lanes : 0
+            lastExBar := xbar
+            xY  = xpx - (offExit + exLane * laneStep) * atr
+            txt = "出場 $" + str.tostring(xpx, format.mintick) + "\n開倉價值 $" + str.tostring(posUSD, "#,###") + "（" + str.tostring(coinQty, "#.###") + " 顆）\n" + (win ? "獲利 +$" : "虧損 -$") + str.tostring(math.abs(pnl), "#,###") + "（" + roeStr + "）\n出場後餘額 $" + str.tostring(eqAfter, "#,###")
+            line.new(xbar, xpx, xbar, xY, color=color.new(win ? color.green : color.red, 30), width=1, style=line.style_dashed)
+            label.new(xbar, xY, txt, style=label.style_label_up, color=col, textcolor=color.white, size=size.small)
+        else
+            label.new(xbar, xpx, "出 " + roeStr, yloc=yloc.price, style=label.style_label_left, color=col, textcolor=color.white, size=size.tiny)
+lastClosed := strategy.closedtrades
+
+// ═══ 視覺化 ═══
+plot(ema, "EMA200", color.new(color.orange, 0))
+bgcolor(bearReg ? color.new(color.red, 94) : na, title="可做空區（熊）")
+plot(strategy.position_size != 0 ? pStop : na, "移動止損／止盈", color.new(color.fuchsia, 0), style=plot.style_linebr, linewidth=2)
+plot(rvol, "RVOL", display=display.data_window)
+plot(binOK ? 1 : 0, "借量在用嗎(1=借幣安/0=本圖自己量)", display=display.data_window)
+
+// ═══ 右上角固定面板（全歷史回測權益）═══
+var table P = table.new(position.top_right, 2, 7, frame_color=color.new(color.gray, 40), frame_width=1, border_color=color.new(color.gray, 60), border_width=1)
+if showPanel and barstate.islast
+    inPos  = strategy.position_size != 0
+    side   = strategy.position_size > 0 ? "持多" : strategy.position_size < 0 ? "持空" : "空手"
+    entPx  = strategy.position_avg_price
+    usdNow = math.abs(strategy.position_size) * entPx
+    bg = color.new(color.black, 15)
+    hp = color.new(color.blue, 0)
+    table.cell(P, 0, 0, "放量突破 v5", text_color=color.white, bgcolor=hp, text_size=size.small)
+    table.cell(P, 1, 0, side,          text_color=color.white, bgcolor=hp, text_size=size.small)
+    table.cell(P, 0, 1, "量來源", text_color=color.silver, bgcolor=bg, text_size=size.small)
+    table.cell(P, 1, 1, binOK ? "借幣安量" : "本圖自己的量", text_color=color.white, bgcolor=bg, text_size=size.small)
+    table.cell(P, 0, 2, "進場價", text_color=color.silver, bgcolor=bg, text_size=size.small)
+    table.cell(P, 1, 2, inPos ? str.tostring(entPx, format.mintick) : "—", text_color=color.white, bgcolor=bg, text_size=size.small)
+    table.cell(P, 0, 3, "倉位 $", text_color=color.silver, bgcolor=bg, text_size=size.small)
+    table.cell(P, 1, 3, inPos ? str.tostring(usdNow, "#,###") : "—", text_color=color.white, bgcolor=bg, text_size=size.small)
+    table.cell(P, 0, 4, "未實現 $", text_color=color.silver, bgcolor=bg, text_size=size.small)
+    table.cell(P, 1, 4, inPos ? str.tostring(strategy.openprofit, "#,###") : "—", text_color=strategy.openprofit >= 0 ? color.lime : color.red, bgcolor=bg, text_size=size.small)
+    table.cell(P, 0, 5, "回測權益 $", text_color=color.silver, bgcolor=bg, text_size=size.small)
+    table.cell(P, 1, 5, str.tostring(strategy.equity, "#,###"), text_color=color.white, bgcolor=bg, text_size=size.small)
+    table.cell(P, 0, 6, "回測損益 $", text_color=color.silver, bgcolor=bg, text_size=size.small)
+    table.cell(P, 1, 6, str.tostring(strategy.netprofit, "#,###"), text_color=strategy.netprofit >= 0 ? color.lime : color.red, bgcolor=bg, text_size=size.small)
