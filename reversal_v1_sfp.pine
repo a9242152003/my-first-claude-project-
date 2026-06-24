@@ -12,7 +12,7 @@ useShort = input.bool(true,  "做空(熊市抓反彈沒力)", group="方向")
 // ═══ 大勢 setup ═══
 emaLen   = input.int(200, "趨勢 EMA",            group="setup")
 slopeLB  = input.int(20,  "EMA 斜率回看",        group="setup")
-adxMin   = input.float(20,"ADX 純度門檻(擋盤整)", group="setup")
+adxMin   = input.float(0, "ADX 純度門檻(擋盤整)", group="setup")
 waveLB   = input.int(3,   "逆波成形回看",        group="setup")
 
 // ═══ SFP 沒力觸發(核心)═══
@@ -20,7 +20,7 @@ sweepN   = input.int(10,  "掃單參考:近N根高/低", group="SFP")
 wickATR  = input.float(0.25,"有意義影線 ×ATR",    group="SFP")
 
 // ═══ convScore 加分(不單獨觸發)═══
-convMin  = input.int(1,   "最低 convScore 才進場(0=純SFP)", group="確認加分")
+convMin  = input.int(0,   "最低 convScore 才進場(0=純SFP)", group="確認加分")
 rsiHiS   = input.float(58,"空:RSI 反彈過熱門檻",  group="確認加分")
 rsiLoL   = input.float(42,"多:RSI 回檔超賣門檻",  group="確認加分")
 zTh      = input.float(2.0,"乖離 z 門檻 σ",        group="確認加分")
@@ -36,7 +36,7 @@ convBoost= input.float(1.5,"convScore≥2 風險加成",  group="部位")
 levCap   = input.float(5.0,"最大槓桿上限",         group="部位")
 swingLen = input.int(5,    "結構停損:近N根擺動極值", group="部位")
 stopBuf  = input.float(0.5,"停損緩衝 ×ATR",        group="部位")
-rrMin    = input.float(1.5,"最低風報比 RR(0=不檢查)", group="部位")
+rrMin    = input.float(0,  "最低風報比 RR(0=不檢查)", group="部位")
 atrTrail = input.float(3.0,"吊燈移動停利 ×ATR",    group="部位")
 
 // ═══ 回測視窗(免Premium)═══
