@@ -160,6 +160,14 @@ anyRed = ddRed or dryRed or pfRed or vRed
 anyYel = ddYel or dryYel or pfYel or vYel
 verdict = anyRed ? "🔴 警戒" : anyYel ? "🟡 觀察" : "🟢 健康"
 
+// ═══ 熔斷推播警報(條件一觸發就推到你手機/Email)═══
+killDDp  = input.float(30, "🔔 熔斷:回撤超過 %", group="熔斷警報", tooltip="設成該標的『回測最大回撤 ×1.3』。BTC 回測約21%→建議設28~30。")
+killUsePF= input.bool(true, "🔔 熔斷:滾動PF 跌破 1", group="熔斷警報")
+killVolp = input.float(15,  "🔔 熔斷:波動度百分位低於 %", group="熔斷警報")
+kill = (curDD >= killDDp) or (killUsePF and strategy.closedtrades >= rollN and rollPF < 1.0) or (not na(volPct) and volPct < killVolp)
+if kill and not kill[1]
+    alert("⚠️ 策略熔斷 " + syminfo.ticker + ":回撤 " + str.tostring(curDD,"#.0") + "% / 滾動PF " + str.tostring(rollPF,"#.00") + " / 波動度 " + str.tostring(volPct,"#") + "% — 建議暫停、重跑驗證複核", alert.freq_once_per_bar)
+
 var table ht = table.new(position.top_right, 2, 6, border_width=1)
 if showHealth and barstate.islast
     table.cell(ht,0,0,"策略健康",text_color=color.white,bgcolor=color.new(color.blue,0),text_size=size.normal)
