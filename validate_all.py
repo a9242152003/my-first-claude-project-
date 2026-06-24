@@ -102,18 +102,21 @@ def backtest(o,h,l,c,vol,t0=None,t1=None):
     return dict(net=net,dd=dd,pf=pf,n=len(tr_),rdd=net/dd if dd>0 else 0)
 
 def validate(ticker):
+    import pandas as pd
     try:
         df=yf.download(ticker, period="max", interval="1d", progress=False, auto_adjust=False)
     except Exception as e:
         return None, f"抓取失敗 {e}"
     if df is None or len(df)<300:
         return None, "資料不足"
-    o=df["Open"].astype(float).values.tolist()
-    h=df["High"].astype(float).values.tolist()
-    l=df["Low"].astype(float).values.tolist()
-    c=df["Close"].astype(float).values.tolist()
-    v=df["Volume"].astype(float).fillna(0).values.tolist() if "Volume" in df else [0]*len(c)
-    o=[x[0] if isinstance(x,(list,tuple)) else x for x in o]  # 防多層欄位
+    if isinstance(df.columns, pd.MultiIndex):       # 單一標的有時是多層欄位 → 攤平
+        df.columns=df.columns.get_level_values(0)
+    df=df.dropna(subset=["Open","High","Low","Close"])
+    o=[float(x) for x in df["Open"].tolist()]
+    h=[float(x) for x in df["High"].tolist()]
+    l=[float(x) for x in df["Low"].tolist()]
+    c=[float(x) for x in df["Close"].tolist()]
+    v=[float(x) for x in df["Volume"].fillna(0).tolist()] if "Volume" in df.columns else [0.0]*len(c)
     N=len(c); mid=N//2
     full=backtest(o,h,l,c,v)
     A=backtest(o,h,l,c,v,None,mid)
