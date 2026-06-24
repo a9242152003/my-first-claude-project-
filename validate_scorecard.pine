@@ -23,6 +23,8 @@ splitDate = input.time(timestamp("2022-01-01 00:00 +0000"), "樣本外切割日"
 minTr  = input.int(15,   "每半最低交易數", group="驗證")
 minPF  = input.float(1.3,"每半最低 PF",   group="驗證")
 minRDD = input.float(3.0,"全期最低 報酬/回撤", group="驗證")
+posI   = input.string("中央","計分卡位置", options=["中央","右上","右下","左上","左下"], group="驗證")
+tpos = posI=="右上"?position.top_right : posI=="右下"?position.bottom_right : posI=="左上"?position.top_left : posI=="左下"?position.bottom_left : position.middle_center
 
 // ── 指標 ──
 atr   = ta.atr(atrLen)
@@ -88,7 +90,7 @@ eqPeak := math.max(eqPeak, strategy.equity)
 maxDDseen := math.max(maxDDseen, (eqPeak - strategy.equity) / eqPeak * 100.0)
 
 // ── 計分卡 ──
-var table sc = table.new(position.top_right, 2, 9, border_width=1)
+var table sc = table.new(tpos, 2, 9, border_width=1)
 if barstate.islast
     float gpA = 0.0
     float glA = 0.0
