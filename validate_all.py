@@ -149,7 +149,7 @@ def main():
     # 寫 markdown
     with open("health_table.md","w",encoding="utf-8") as fp:
         fp.write("# 標的資格自動驗證表\n\n")
-        fp.write("> ⚠️ **資料可信度**:幣 + 美股(yfinance)判決可信。**台股(.TW / 加權指數)yfinance 資料不可靠,判決僅供參考,以 TradingView『ADJ 還原』回測為準** —— 例:0050 自動表顯示 FAIL,但 TradingView 實測為 +702%/PF3.31 的強標的。台股請用 `validate_scorecard.pine` 在 TradingView 上自行核對。\n\n")
+        fp.write("> ⚠️ **資料可信度**:幣 + 美股(yfinance)判決可信。**台股(.TW / 加權指數)yfinance 資料品質較弱,判決僅供參考**,請用 `validate_scorecard.pine` 在 TradingView(開 ADJ 還原)上以該股『自己的量』核對。\n>\n> 註:若你在 TradingView 看到 0050 等台股的亮眼成績,是用「本圖價×幣安量」版(RVOL 抓的是 BTC 的量,對股票無效),不是 0050 自己的量,不可當真實成績。\n\n")
         fp.write(f"判準:前後半各 交易≥{MIN_TR_HALF} 且 PF≥{MIN_PF_HALF} 且 報酬/回撤≥{MIN_RDD_HALF},全期 報酬/回撤≥{MIN_RDD_FULL} → PASS\n\n")
         for tag,a,b in rows:
             if tag=="CAT":
