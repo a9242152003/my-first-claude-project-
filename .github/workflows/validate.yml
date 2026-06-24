@@ -1,9 +1,9 @@
 name: 標的資格自動驗證
 
-# 每月 1 號自動跑(GitHub 伺服器有網路,能抓 yfinance)+ 可手動觸發
+# 每週一自動跑(及每月)+ push 到 main + 可手動觸發
 on:
   schedule:
-    - cron: "0 0 1 * *"
+    - cron: "0 0 * * 1"   # 每週一 00:00 UTC
   workflow_dispatch: {}
   push:
     branches: [main]
@@ -23,7 +23,7 @@ jobs:
           python-version: "3.11"
       - name: 安裝依賴
         run: pip install yfinance
-      - name: 跑驗證(抓資料 + 回測 + 產表)
+      - name: 跑驗證(抓資料 + 回測 + 產表 + 監控清單)
         run: python validate_all.py
       - name: 把最新的表 commit 回 repo
         run: |
@@ -36,3 +36,33 @@ jobs:
             git commit -m "自動更新:標的資格驗證表 $(date +%Y-%m-%d)"
             git push
           fi
+      - name: 寄信通知(若有設定 MAIL_PASSWORD secret)
+        if: ${{ env.MAIL_PASSWORD != '' }}
+        env:
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        continue-on-error: true
+        run: |
+          if [ -f watch_status.txt ] && grep -q PROBLEM watch_status.txt; then
+            python - <<'PY'
+          import smtplib, os
+          from email.mime.text import MIMEText
+          body=open("watch_status.txt",encoding="utf-8").read()
+          msg=MIMEText("你的監控清單有標的失效,建議暫停複核:\n\n"+body+"\n\n詳見 repo 的 health_table.md","plain","utf-8")
+          msg["Subject"]="⚠️ 策略監控:有標的失效"
+          msg["From"]="a9242152003@gmail.com"
+          msg["To"]="a9242152003@gmail.com"
+          s=smtplib.SMTP_SSL("smtp.gmail.com",465)
+          s.login("a9242152003@gmail.com",os.environ["MAIL_PASSWORD"])
+          s.send_message(msg); s.quit()
+          print("已寄出通知信")
+          PY
+          else
+            echo "無問題,不寄信"
+          fi
+      - name: 出問題就讓流程失敗(GitHub 會自動寄失敗通知到擁有者信箱)
+        run: |
+          if [ -f watch_status.txt ] && grep -q PROBLEM watch_status.txt; then
+            echo "::error::監控清單有標的失效 → $(cat watch_status.txt)"
+            exit 1
+          fi
+          echo "監控清單全數正常 ✅"
