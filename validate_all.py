@@ -25,6 +25,9 @@ ASSETS = {
     "台股前10大": ["2330.TW","2317.TW","2454.TW","2308.TW","2382.TW","2891.TW","2412.TW","2881.TW","3711.TW","2603.TW"],
 }
 
+# ── 監控清單:你「實際在交易」的標的。其中任何一個變 FAIL → 視為問題、寄信通知 ──
+WATCHLIST = ["BTC-USD","ETH-USD","SOL-USD","NVDA"]
+
 # ── 嚴格門檻 ──
 MIN_TR_HALF = 15
 MIN_PF_HALF = 1.3
@@ -127,6 +130,7 @@ def validate(ticker):
 
 def main():
     rows=[]
+    results={}   # ticker -> True/False/None(抓不到)
     print(f"{'標的':<12}{'全PF':>6}{'全RDD':>7}{'前PF':>6}{'前n':>5}{'後PF':>6}{'後n':>5}  判決")
     for cat, tickers in ASSETS.items():
         print(f"\n=== {cat} ===")
@@ -135,11 +139,11 @@ def main():
             res,err=validate(tk)
             if err:
                 print(f"{tk:<12} {err}")
-                rows.append((tk,err,None)); continue
+                rows.append((tk,err,None)); results[tk]=None; continue
             f,A,B=res['full'],res['A'],res['B']
             verdict="✅ PASS" if res['passed'] else "❌ FAIL"
             print(f"{tk:<12}{f['pf']:>6.2f}{f['rdd']:>7.1f}{A['pf']:>6.2f}{A['n']:>5}{B['pf']:>6.2f}{B['n']:>5}  {verdict}")
-            rows.append((tk,res,None))
+            rows.append((tk,res,None)); results[tk]=res['passed']
     # 寫 markdown
     with open("health_table.md","w",encoding="utf-8") as fp:
         fp.write("# 標的資格自動驗證表\n\n")
@@ -154,6 +158,13 @@ def main():
             else:
                 fp.write(f"| {tag} | — | — | — | — | {a} |\n")
     print("\n已寫出 health_table.md")
+    # ── 監控清單檢查:任何持有標的變 FAIL 或抓不到 → 標記問題 ──
+    problems=[tk for tk in WATCHLIST if results.get(tk) is not True]
+    with open("watch_status.txt","w",encoding="utf-8") as fp:
+        fp.write(("PROBLEM: "+", ".join(problems)) if problems else "OK")
+    if problems:
+        print("\n⚠️ 監控清單出問題:", ", ".join(problems))
+    return problems
 
 if __name__=="__main__":
-    main()
+    main()   # 問題寫進 watch_status.txt,由 workflow 判定是否寄信(腳本本身正常結束,確保表能 commit)
