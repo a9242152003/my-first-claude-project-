@@ -1,11 +1,11 @@
 //@version=5
-// 錨定式前進測試 Anchored Walk-Forward OOS(驗證「驗證本身」)— Claude
-// 掛在 BTC(或任何標的)日線圖。一年一年往前滾:
-//   「前累積PF」= 只用該年「以前」的資料算的成績 → 你站在那年初會不會說「可做」(事前判定,沒偷看未來)。
-//   「該年PF/報酬」= 那一年真的跑出來的結果(事後、當年是未知的 = 真正的樣本外)。
-//   「吻合」= 事前判定 與 事後結果 對不對得上。
-// 底下總結:事前判「可做」的年份裡,事後真的賺錢的比率(=這套綠燈的預測力)。比率高 → 驗證可信。
-indicator("錨定前進測試 OOS — Claude", overlay=true)
+// 錨定式前進測試 OOS · 增益(lift)版 — Claude
+// 掛任何標的日線圖。一年一年往前滾,每年用「滾動近N年」的成績當『事前判定』(不偷看未來、也不被古早資料拖死):
+//   判定『可做』= 近N年滾動 PF ≥ 門檻;事後看『該年』真的賺不賺。
+// 關鍵看「增益」:可做年的勝率 有沒有 明顯高過 不做年的勝率 與 基準勝率。
+//   有明顯高 → 判定真的有鑑別力(會挑);差不多 → 判定沒用(只是反映標的本來好壞)。
+// 修正:該年% 用『該年初的權益』當分母(不再用固定本金,避免後期數字爆掉失真)。
+indicator("錨定前進 OOS · 增益版 — Claude", overlay=true)
 
 boxLen   = 10
 rvolLen  = 20
@@ -21,10 +21,12 @@ beATR    = 3.0
 COMM     = 0.00055
 INIT     = 1000000.0
 
-qPF    = input.float(1.5, "事前判定『可做』:前累積 PF ≥", group="判定")
-qMinN  = input.int(15,    "事前判定:前累積最低交易數",   group="判定")
-okPF   = input.float(1.3, "事後該年算『成功』:該年 PF ≥", group="判定")
-posI   = input.string("右上","表格位置", options=["右上","右下","左上","左下","中央"], group="顯示")
+lookYrs = input.int(3,    "事前判定:滾動近幾年", group="判定")
+qPF     = input.float(1.5,"事前判定『可做』:滾動 PF ≥", group="判定")
+qMinN   = input.int(10,   "事前判定:滾動窗最低交易數", group="判定")
+okPF    = input.float(1.3,"事後該年算『成功』:該年 PF ≥", group="判定")
+liftMin = input.float(15, "判定可信:增益(可做-不做)需 ≥ 幾個百分點", group="判定")
+posI    = input.string("右上","表格位置", options=["右上","右下","左上","左下","中央"], group="顯示")
 tpos = posI=="右下"?position.bottom_right : posI=="左上"?position.top_left : posI=="左下"?position.bottom_left : posI=="中央"?position.middle_center : position.top_right
 
 ema200 = ta.ema(close, emaLen)
@@ -114,11 +116,11 @@ hC = color.new(color.blue, 0)
 
 if barstate.islast
     table.clear(tb, 0, 0, 4, 39)
-    table.cell(tb, 0, 0, "年",          text_color=color.white, bgcolor=hC, text_size=size.small)
-    table.cell(tb, 1, 0, "前累積PF(事前判定)", text_color=color.white, bgcolor=hC, text_size=size.small)
-    table.cell(tb, 2, 0, "該年PF(事後)",  text_color=color.white, bgcolor=hC, text_size=size.small)
-    table.cell(tb, 3, 0, "該年%",         text_color=color.white, bgcolor=hC, text_size=size.small)
-    table.cell(tb, 4, 0, "吻合",          text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 0, 0, "年",        text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 1, 0, "近"+str.tostring(lookYrs)+"年PF(判定)", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 2, 0, "該年PF(事後)", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 3, 0, "該年%",       text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 4, 0, "吻合",        text_color=color.white, bgcolor=hC, text_size=size.small)
     int sz = array.size(plArr)
     int minY = 9999
     int maxY = 0
@@ -129,59 +131,79 @@ if barstate.islast
             maxY := math.max(maxY, yy)
     int row = 1
     int nEval = 0
-    int nMatch = 0
-    int nQual = 0
-    int nQualHit = 0
+    int nWin  = 0
+    int nQ    = 0
+    int nQWin = 0
+    int nU    = 0
+    int nUWin = 0
     if sz > 0
         for Y = minY to maxY
-            float pGp = 0.0
-            float pGl = 0.0
-            int   pN  = 0
+            float rGp = 0.0
+            float rGl = 0.0
+            int   rN  = 0
             float yGp = 0.0
             float yGl = 0.0
             int   yN  = 0
             float yNet = 0.0
+            float beforeNet = 0.0
             for i = 0 to sz - 1
                 int yy = year(int(array.get(etArr, i)))
                 float p = array.get(plArr, i)
                 if yy < Y
-                    pN  := pN + 1
-                    pGp := pGp + (p > 0 ? p : 0.0)
-                    pGl := pGl + (p < 0 ? -p : 0.0)
-                else if yy == Y
+                    beforeNet := beforeNet + p
+                if yy >= Y - lookYrs and yy <= Y - 1
+                    rN  := rN + 1
+                    rGp := rGp + (p > 0 ? p : 0.0)
+                    rGl := rGl + (p < 0 ? -p : 0.0)
+                if yy == Y
                     yN   := yN + 1
                     yNet := yNet + p
                     yGp  := yGp + (p > 0 ? p : 0.0)
                     yGl  := yGl + (p < 0 ? -p : 0.0)
-            if pN >= qMinN and yN > 0
-                float pPF = pGl > 0 ? pGp / pGl : (pGp > 0 ? 99.0 : 0.0)
+            if rN >= qMinN and yN > 0
+                float rPF = rGl > 0 ? rGp / rGl : (rGp > 0 ? 99.0 : 0.0)
                 float yPF = yGl > 0 ? yGp / yGl : (yGp > 0 ? 99.0 : 0.0)
-                float yRet = yNet / INIT * 100.0
-                bool qualified = pPF >= qPF
+                float startEq = INIT + beforeNet
+                float yRet = startEq != 0 ? yNet / startEq * 100.0 : na
+                bool qualified = rPF >= qPF
                 bool yearOK    = yPF >= okPF
                 bool match     = qualified == yearOK
                 nEval := nEval + 1
+                if yearOK
+                    nWin := nWin + 1
                 if qualified
-                    nQual := nQual + 1
+                    nQ := nQ + 1
                     if yearOK
-                        nQualHit := nQualHit + 1
-                if match
-                    nMatch := nMatch + 1
+                        nQWin := nQWin + 1
+                else
+                    nU := nU + 1
+                    if yearOK
+                        nUWin := nUWin + 1
                 table.cell(tb, 0, row, str.tostring(Y), text_color=color.white, bgcolor=kC, text_size=size.small)
-                table.cell(tb, 1, row, str.tostring(pPF,"#.0")+(qualified?" 可做":" 不做"), text_color=color.white, bgcolor=qualified?gC:rC, text_size=size.small)
+                table.cell(tb, 1, row, str.tostring(rPF,"#.0")+(qualified?" 可做":" 不做"), text_color=color.white, bgcolor=qualified?gC:rC, text_size=size.small)
                 table.cell(tb, 2, row, str.tostring(yPF,"#.0")+(yearOK?" 賺":" 虧"),       text_color=color.white, bgcolor=yearOK?gC:rC, text_size=size.small)
-                table.cell(tb, 3, row, str.tostring(yRet,"#")+"%", text_color=color.white, bgcolor=yRet>=0?gC:rC, text_size=size.small)
+                table.cell(tb, 3, row, na(yRet)?"—":str.tostring(yRet,"#")+"%", text_color=color.white, bgcolor=(not na(yRet) and yRet>=0)?gC:rC, text_size=size.small)
                 table.cell(tb, 4, row, match?"✅":"❌", text_color=color.white, bgcolor=match?gC:rC, text_size=size.small)
                 row := row + 1
-    float prec = nQual > 0 ? nQualHit * 100.0 / nQual : na
-    float hit  = nEval > 0 ? nMatch  * 100.0 / nEval : na
-    bool trust = not na(prec) and prec >= 70
-    table.cell(tb, 0, row, "判可做→真賺", text_color=color.white, bgcolor=kC, text_size=size.small)
-    table.cell(tb, 1, row, na(prec)?"—":str.tostring(prec,"#")+"%", text_color=color.white, bgcolor=na(prec)?kC:(prec>=70?gC:rC), text_size=size.small)
-    table.cell(tb, 2, row, "整體吻合", text_color=color.white, bgcolor=kC, text_size=size.small)
-    table.cell(tb, 3, row, na(hit)?"—":str.tostring(hit,"#")+"%", text_color=color.white, bgcolor=na(hit)?kC:(hit>=70?gC:rC), text_size=size.small)
-    table.cell(tb, 4, row, str.tostring(nQualHit)+"/"+str.tostring(nQual), text_color=color.white, bgcolor=kC, text_size=size.small)
+    float qWin = nQ > 0 ? nQWin * 100.0 / nQ : na
+    float uWin = nU > 0 ? nUWin * 100.0 / nU : na
+    float base = nEval > 0 ? nWin * 100.0 / nEval : na
+    float lift = (not na(qWin) and not na(uWin)) ? qWin - uWin : na
+    bool enough = nQ >= 3 and nU >= 3
+    bool trust  = enough and not na(lift) and lift >= liftMin
+    table.cell(tb, 0, row, "可做年勝率", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 1, row, na(qWin)?"—":str.tostring(qWin,"#")+"% ("+str.tostring(nQ)+")", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 2, row, "不做年勝率", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 3, row, na(uWin)?"—":str.tostring(uWin,"#")+"% ("+str.tostring(nU)+")", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 4, row, "", bgcolor=kC)
     row := row + 1
+    table.cell(tb, 0, row, "基準勝率", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 1, row, na(base)?"—":str.tostring(base,"#")+"%", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 2, row, "增益(可做-不做)", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 3, row, na(lift)?"—":str.tostring(lift,"#")+"pp", text_color=color.white, bgcolor=na(lift)?kC:(lift>=liftMin?gC:rC), text_size=size.small)
+    table.cell(tb, 4, row, "", bgcolor=kC)
+    row := row + 1
+    string vtxt = not enough ? ("資料不足 可做"+str.tostring(nQ)+"/不做"+str.tostring(nU)) : (trust ? "✅ 判定有鑑別力" : "⚠️ 判定沒鑑別力")
     table.cell(tb, 0, row, "驗證可信?", text_color=color.white, bgcolor=hC, text_size=size.normal)
-    table.cell(tb, 1, row, na(prec)?"資料不足":(trust?"✅ 有預測力":"⚠️ 預測力弱"), text_color=color.white, bgcolor=na(prec)?kC:(trust?gC:rC), text_size=size.normal)
+    table.cell(tb, 1, row, vtxt, text_color=color.white, bgcolor=not enough?kC:(trust?gC:rC), text_size=size.normal)
     table.merge_cells(tb, 1, row, 4, row)
