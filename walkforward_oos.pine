@@ -106,14 +106,14 @@ if canTrade
 
 plot(ema200, "EMA200", color.new(color.orange, 0))
 
-var table tb = table.new(tpos, 5, 20, border_width=1, frame_width=1, frame_color=color.gray)
+var table tb = table.new(tpos, 5, 40, border_width=1, frame_width=1, frame_color=color.gray)
 gC = color.new(color.green, 0)
 rC = color.new(color.red, 0)
 kC = color.new(color.gray, 20)
 hC = color.new(color.blue, 0)
 
 if barstate.islast
-    table.clear(tb, 0, 0, 4, 19)
+    table.clear(tb, 0, 0, 4, 39)
     table.cell(tb, 0, 0, "年",          text_color=color.white, bgcolor=hC, text_size=size.small)
     table.cell(tb, 1, 0, "前累積PF(事前判定)", text_color=color.white, bgcolor=hC, text_size=size.small)
     table.cell(tb, 2, 0, "該年PF(事後)",  text_color=color.white, bgcolor=hC, text_size=size.small)
