@@ -1,0 +1,187 @@
+//@version=5
+// 錨定式前進測試 Anchored Walk-Forward OOS(驗證「驗證本身」)— Claude
+// 掛在 BTC(或任何標的)日線圖。一年一年往前滾:
+//   「前累積PF」= 只用該年「以前」的資料算的成績 → 你站在那年初會不會說「可做」(事前判定,沒偷看未來)。
+//   「該年PF/報酬」= 那一年真的跑出來的結果(事後、當年是未知的 = 真正的樣本外)。
+//   「吻合」= 事前判定 與 事後結果 對不對得上。
+// 底下總結:事前判「可做」的年份裡,事後真的賺錢的比率(=這套綠燈的預測力)。比率高 → 驗證可信。
+indicator("錨定前進測試 OOS — Claude", overlay=true)
+
+boxLen   = 10
+rvolLen  = 20
+rvolMin  = 1.3
+emaLen   = 200
+atrLen   = 14
+atrBuf   = 0.25
+atrTrail = 3.5
+riskPct  = 5.0
+levCap   = 5.0
+minStopP = 0.005
+beATR    = 3.0
+COMM     = 0.00055
+INIT     = 1000000.0
+
+qPF    = input.float(1.5, "事前判定『可做』:前累積 PF ≥", group="判定")
+qMinN  = input.int(15,    "事前判定:前累積最低交易數",   group="判定")
+okPF   = input.float(1.3, "事後該年算『成功』:該年 PF ≥", group="判定")
+posI   = input.string("右上","表格位置", options=["右上","右下","左上","左下","中央"], group="顯示")
+tpos = posI=="右下"?position.bottom_right : posI=="左上"?position.top_left : posI=="左下"?position.bottom_left : posI=="中央"?position.middle_center : position.top_right
+
+ema200 = ta.ema(close, emaLen)
+atr    = ta.atr(atrLen)
+vsma   = ta.sma(volume, rvolLen)
+rvol   = vsma > 0 ? volume / vsma : 0.0
+hh10   = ta.highest(high, boxLen)[1]
+ll10   = ta.lowest(low,  boxLen)[1]
+
+var float cash  = INIT
+var int   pos   = 0
+var float qty   = 0.0
+var float entry = 0.0
+var float pst   = 0.0
+var float atrE  = 0.0
+var float hh    = 0.0
+var float ll    = 0.0
+var bool  beArm = false
+var float etime = 0.0
+var array<float> plArr = array.new_float(0)
+var array<float> etArr = array.new_float(0)
+
+if pos != 0 and not na(atr)
+    float ex = na
+    if pos > 0
+        if low <= pst
+            ex := open < pst ? open : pst
+    else
+        if high >= pst
+            ex := open > pst ? open : pst
+    if not na(ex)
+        float pnl = pos > 0 ? (ex - entry) * qty : (entry - ex) * qty
+        pnl := pnl - COMM * qty * (entry + ex)
+        cash := cash + pnl
+        array.push(plArr, pnl)
+        array.push(etArr, etime)
+        pos := 0
+    else
+        if pos > 0
+            hh := math.max(hh, high)
+            if not beArm and hh >= entry + beATR * atrE
+                beArm := true
+            pst := math.max(pst, hh - atrTrail * atr)
+            if beArm
+                pst := math.max(pst, entry)
+        else
+            ll := math.min(ll, low)
+            if not beArm and ll <= entry - beATR * atrE
+                beArm := true
+            pst := math.min(pst, ll + atrTrail * atr)
+            if beArm
+                pst := math.min(pst, entry)
+
+bool canTrade = pos == 0 and bar_index > emaLen and not na(atr) and not na(ema200[20]) and not na(hh10)
+if canTrade
+    bool bear   = ema200 < ema200[20]
+    bool longS  = close > hh10 + atrBuf * atr and rvol >= rvolMin and close > ema200
+    bool shortS = bear and close < ll10 - atrBuf * atr and rvol >= rvolMin and close < ema200
+    if longS
+        float d = math.max((close - low[1]) / close, minStopP)
+        qty   := math.min(cash * riskPct / 100.0 / (d * close), levCap * cash / close)
+        pos   := 1
+        entry := close
+        pst   := close - d * close
+        atrE  := atr
+        hh    := high
+        beArm := false
+        etime := time
+    else if shortS
+        float d = math.max((high[1] - close) / close, minStopP)
+        qty   := math.min(cash * riskPct / 100.0 / (d * close), levCap * cash / close)
+        pos   := -1
+        entry := close
+        pst   := close + d * close
+        atrE  := atr
+        ll    := low
+        beArm := false
+        etime := time
+
+plot(ema200, "EMA200", color.new(color.orange, 0))
+
+var table tb = table.new(tpos, 5, 20, border_width=1, frame_width=1, frame_color=color.gray)
+gC = color.new(color.green, 0)
+rC = color.new(color.red, 0)
+kC = color.new(color.gray, 20)
+hC = color.new(color.blue, 0)
+
+if barstate.islast
+    table.clear(tb, 0, 0, 4, 19)
+    table.cell(tb, 0, 0, "年",          text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 1, 0, "前累積PF(事前判定)", text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 2, 0, "該年PF(事後)",  text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 3, 0, "該年%",         text_color=color.white, bgcolor=hC, text_size=size.small)
+    table.cell(tb, 4, 0, "吻合",          text_color=color.white, bgcolor=hC, text_size=size.small)
+    int sz = array.size(plArr)
+    int minY = 9999
+    int maxY = 0
+    if sz > 0
+        for i = 0 to sz - 1
+            int yy = year(int(array.get(etArr, i)))
+            minY := math.min(minY, yy)
+            maxY := math.max(maxY, yy)
+    int row = 1
+    int nEval = 0
+    int nMatch = 0
+    int nQual = 0
+    int nQualHit = 0
+    if sz > 0
+        for Y = minY to maxY
+            float pGp = 0.0
+            float pGl = 0.0
+            int   pN  = 0
+            float yGp = 0.0
+            float yGl = 0.0
+            int   yN  = 0
+            float yNet = 0.0
+            for i = 0 to sz - 1
+                int yy = year(int(array.get(etArr, i)))
+                float p = array.get(plArr, i)
+                if yy < Y
+                    pN  := pN + 1
+                    pGp := pGp + (p > 0 ? p : 0.0)
+                    pGl := pGl + (p < 0 ? -p : 0.0)
+                else if yy == Y
+                    yN   := yN + 1
+                    yNet := yNet + p
+                    yGp  := yGp + (p > 0 ? p : 0.0)
+                    yGl  := yGl + (p < 0 ? -p : 0.0)
+            if pN >= qMinN and yN > 0
+                float pPF = pGl > 0 ? pGp / pGl : (pGp > 0 ? 99.0 : 0.0)
+                float yPF = yGl > 0 ? yGp / yGl : (yGp > 0 ? 99.0 : 0.0)
+                float yRet = yNet / INIT * 100.0
+                bool qualified = pPF >= qPF
+                bool yearOK    = yPF >= okPF
+                bool match     = qualified == yearOK
+                nEval := nEval + 1
+                if qualified
+                    nQual := nQual + 1
+                    if yearOK
+                        nQualHit := nQualHit + 1
+                if match
+                    nMatch := nMatch + 1
+                table.cell(tb, 0, row, str.tostring(Y), text_color=color.white, bgcolor=kC, text_size=size.small)
+                table.cell(tb, 1, row, str.tostring(pPF,"#.0")+(qualified?" 可做":" 不做"), text_color=color.white, bgcolor=qualified?gC:rC, text_size=size.small)
+                table.cell(tb, 2, row, str.tostring(yPF,"#.0")+(yearOK?" 賺":" 虧"),       text_color=color.white, bgcolor=yearOK?gC:rC, text_size=size.small)
+                table.cell(tb, 3, row, str.tostring(yRet,"#")+"%", text_color=color.white, bgcolor=yRet>=0?gC:rC, text_size=size.small)
+                table.cell(tb, 4, row, match?"✅":"❌", text_color=color.white, bgcolor=match?gC:rC, text_size=size.small)
+                row := row + 1
+    float prec = nQual > 0 ? nQualHit * 100.0 / nQual : na
+    float hit  = nEval > 0 ? nMatch  * 100.0 / nEval : na
+    bool trust = not na(prec) and prec >= 70
+    table.cell(tb, 0, row, "判可做→真賺", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 1, row, na(prec)?"—":str.tostring(prec,"#")+"%", text_color=color.white, bgcolor=na(prec)?kC:(prec>=70?gC:rC), text_size=size.small)
+    table.cell(tb, 2, row, "整體吻合", text_color=color.white, bgcolor=kC, text_size=size.small)
+    table.cell(tb, 3, row, na(hit)?"—":str.tostring(hit,"#")+"%", text_color=color.white, bgcolor=na(hit)?kC:(hit>=70?gC:rC), text_size=size.small)
+    table.cell(tb, 4, row, str.tostring(nQualHit)+"/"+str.tostring(nQual), text_color=color.white, bgcolor=kC, text_size=size.small)
+    row := row + 1
+    table.cell(tb, 0, row, "驗證可信?", text_color=color.white, bgcolor=hC, text_size=size.normal)
+    table.cell(tb, 1, row, na(prec)?"資料不足":(trust?"✅ 有預測力":"⚠️ 預測力弱"), text_color=color.white, bgcolor=na(prec)?kC:(trust?gC:rC), text_size=size.normal)
+    table.merge_cells(tb, 1, row, 4, row)
