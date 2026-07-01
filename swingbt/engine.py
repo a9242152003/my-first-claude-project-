@@ -103,8 +103,8 @@ def run(data: OHLCV, strategy: Strategy, cost: CostModel,
                 # 未觸損 → 更新下一根生效的停損
                 pos.stop = strategy.update_stop(i, pos)
 
-        # ── C:進場 ──
-        if pos is None and i >= warmup:
+        # ── C:進場(最後一根不開:沒有後續 bar 可管理,只會變成 bars=0 的幽靈單)──
+        if pos is None and warmup <= i < N - 1:
             e = strategy.entry(i)
             if e is not None:
                 if e.direction < 0 and not cost.allow_short:
@@ -119,13 +119,13 @@ def run(data: OHLCV, strategy: Strategy, cost: CostModel,
                 qty_cap = cost.max_leverage * cash / entry_price
                 qty = min(qty_risk, qty_cap)
                 if qty > 0:
+                    # 停損距離 = 用來 sizing 的距離(已套 min_stop_frac 下限)。
+                    # 把實際停損放在「和 sizing 一致」的距離上,實現風險才會等於 risk_pct;
+                    # 且此式在正常情況(原始停損比下限寬)會還原策略原本的停損價。
+                    stop_price = (entry_price - stop_dist if e.direction > 0
+                                  else entry_price + stop_dist)
                     pos = Position(direction=e.direction, entry_price=entry_price,
-                                   qty=qty, entry_i=i, stop=e.stop)
-                    # 若初始停損方向不對(在錯的一邊),用風險距離重設,避免立即觸損
-                    if pos.direction > 0 and pos.stop >= entry_price:
-                        pos.stop = entry_price - stop_dist
-                    if pos.direction < 0 and pos.stop <= entry_price:
-                        pos.stop = entry_price + stop_dist
+                                   qty=qty, entry_i=i, stop=stop_price)
                     strategy.on_entry(i, pos)
 
         # ── D:記錄權益 ──

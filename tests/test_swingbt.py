@@ -100,6 +100,47 @@ def test_engine_runs_and_equity_wellformed():
         assert t["pnl"] <= gross + 1e-6  # 成本只會讓 pnl <= gross
 
 
+def test_realized_risk_matches_intended_with_tight_stop():
+    """回歸:策略停損比 min_stop_frac 還緊時,實際虧損仍應 ≈ 預定風險(不可被少算)。"""
+    import datetime as dt
+    from swingbt.strategies.base import Strategy, Entry
+    from swingbt.costs import CostModel
+    from swingbt.data import OHLCV
+
+    class TightStop(Strategy):
+        name = "tight"
+        @property
+        def warmup(self): return 2
+        def prepare(self, data): pass
+        def entry(self, i):
+            return Entry(direction=+1, stop=100.0 * 0.999) if i == 2 else None  # 0.1% 停損
+        def update_stop(self, i, pos): return pos.stop
+
+    n = 6
+    o = np.array([100, 100, 100, 100.0, 100, 100])
+    h = np.array([100, 100, 100, 100.0, 100, 100])
+    l = np.array([100, 100, 100, 99.0, 100, 100])   # bar3 跌破被觸損
+    c = np.array([100, 100, 100, 99.5, 100, 100])
+    dates = [dt.date(2020, 1, 1) + dt.timedelta(days=k) for k in range(n)]
+    d = OHLCV("T", "crypto", dates, o, h, l, c, np.ones(n) * 1e6)
+    free = CostModel("free", 0, 0, 0, True, 10.0, 365)  # 零成本、槓桿夠大不受 cap
+    res = run(d, TightStop(), free, init_capital=1_000_000, risk_pct=5.0)
+    assert len(res.trades) == 1
+    loss = res.trades[0]["pnl"]
+    # 預定風險 = 5% * 100萬 = 5萬;停損距離用 min_stop_frac(0.5%),實際觸損虧損應 ≈ -5萬
+    assert abs(loss + 50_000) < 500, f"實現風險與預定不符:{loss}"
+
+
+def test_no_zero_bar_phantom_trades():
+    """回歸:最後一根不開倉,不應出現 bars==0 的幽靈單。"""
+    from swingbt.costs import get_cost_model
+    for kind, market in [("trending_hivol", "crypto"), ("mean_reverting", "index_us")]:
+        for sname in ["breakout", "meanrev", "macross"]:
+            d = gen_synthetic(kind, n=800, seed=1)
+            res = run(d, strat.build(sname), get_cost_model(market))
+            assert all(t["bars"] >= 1 for t in res.trades), f"{sname}/{kind} 出現 bars=0 幽靈單"
+
+
 def test_short_blocked_when_market_disallows():
     """台股成本模型 allow_short=False → 不應有任何空單成交。"""
     d = gen_synthetic("bear", n=800, seed=2)

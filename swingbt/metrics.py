@@ -27,7 +27,8 @@ def _max_drawdown(equity: np.ndarray):
     longest = 0
     cur_len = 0
     for x in equity:
-        if x > peak:
+        # 只有「嚴格低於前高」才算回撤中;持平(= 前高,如暖身期)不算乾旱。
+        if x >= peak:
             peak = x
             cur_len = 0
         else:
@@ -39,12 +40,24 @@ def _max_drawdown(equity: np.ndarray):
     return max_dd, longest
 
 
-def equity_metrics(equity: np.ndarray, years: float, ppy: int) -> dict:
+def _trim_flat_prefix(equity: np.ndarray) -> np.ndarray:
+    """去掉最前面「持平的暖身段」(權益還沒動),讓風險指標與 B&H 可比。
+    保留最後一根持平 bar,使第一筆變動能被算進報酬序列。"""
+    e = np.asarray(equity, float)
+    i = 0
+    while i < len(e) - 1 and e[i] == e[0]:
+        i += 1
+    start = max(i - 1, 0)
+    return e[start:]
+
+
+def equity_metrics(equity: np.ndarray, years: float, ppy: float) -> dict:
     equity = np.asarray(equity, float)
     init, final = equity[0], equity[-1]
     total_ret = final / init - 1.0 if init else 0.0
     cagr = (final / init) ** (1.0 / years) - 1.0 if (init > 0 and final > 0 and years > 0) else float("nan")
-    r = _returns(equity)
+    # 風險指標用「去掉暖身持平段」的報酬序列(避免被前導 0 稀釋、且與 B&H 對齊)
+    r = _returns(_trim_flat_prefix(equity))
     ann_vol = float(np.std(r) * np.sqrt(ppy)) if len(r) else 0.0
     mean_r = float(np.mean(r)) if len(r) else 0.0
     sharpe = (mean_r / np.std(r) * np.sqrt(ppy)) if (len(r) and np.std(r) > 0) else 0.0
@@ -74,7 +87,7 @@ def trade_metrics(trades: list) -> dict:
                 "payoff": 0.0, "avg_bars": 0.0, "pct_long": 0.0}
     pnls = np.array([t["pnl"] for t in trades], float)
     wins = pnls[pnls > 0]
-    losses = pnls[pnls <= 0]
+    losses = pnls[pnls < 0]        # 嚴格虧損才算 loss;打平(pnl==0)不列入輸贏
     gross_win = float(wins.sum())
     gross_loss = float(-losses.sum())
     pf = gross_win / gross_loss if gross_loss > 0 else (float("inf") if gross_win > 0 else 0.0)
@@ -93,17 +106,29 @@ def trade_metrics(trades: list) -> dict:
     }
 
 
-def buy_and_hold(data, ppy: int) -> dict:
+def bars_per_year(data) -> float:
+    """實測「每年幾根 bar」= 資料筆數 / 年數。
+
+    用實測值年化,才能同時對上真實資料(股票 ~252 交易日/年、幣 ~365)
+    與合成資料(連續日曆日 ~365),避免硬編 ppy 與實際 bar 間距打架。
+    """
+    y = data.years()
+    return (len(data) / y) if y > 0 else 252.0
+
+
+def buy_and_hold(data, ppy: float = None) -> dict:
     """買進持有基準:第一根收盤全押到最後。"""
     c = np.asarray(data.c, float)
     equity = c / c[0]
+    if ppy is None:
+        ppy = bars_per_year(data)
     m = equity_metrics(equity, data.years(), ppy)
     m["strategy"] = "buy_hold"
     return m
 
 
 def compute_metrics(result) -> dict:
-    ppy = result.cost.periods_per_year
+    ppy = bars_per_year(result.data)   # 實測年化,策略與 B&H 用同一把尺
     years = result.data.years()
     m = equity_metrics(result.equity, years, ppy)
     m.update(trade_metrics(result.trades))
@@ -113,7 +138,7 @@ def compute_metrics(result) -> dict:
     m["ticker"] = result.ticker
     m["market"] = result.market
     # 附基準與超額
-    bh = buy_and_hold(result.data, ppy)
+    bh = buy_and_hold(result.data)
     m["bh_total_return"] = bh["total_return"]
     m["bh_cagr"] = bh["cagr"]
     m["bh_max_dd"] = bh["max_dd"]

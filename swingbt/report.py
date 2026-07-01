@@ -56,7 +56,7 @@ def run_grid_mc(markets: list, strategy_names: list, seeds: list, n: int = 1500,
         bh_ms = []
         for sd in seeds:
             d = gen_synthetic(mk["kind"], n=n, seed=sd, market=mk["market"])
-            bh_ms.append(buy_and_hold(d, cost.periods_per_year))
+            bh_ms.append(buy_and_hold(d))
         bh_row = _aggregate("buy_hold", mk["label"], mk["market"], bh_ms,
                             beats_key="total_return", bh_key="total_return")
         bh_row["beats_bh_rate"] = float("nan")
@@ -97,7 +97,7 @@ def run_grid(cases: list, strategy_names: list, init_capital: float = 1_000_000.
             continue
 
         # 基準:買進持有
-        bh = buy_and_hold(data, cost.periods_per_year)
+        bh = buy_and_hold(data)
         rows.append({"label": label, "market": market, "strategy": "buy_hold",
                      "cagr": bh["cagr"], "max_dd": bh["max_dd"],
                      "total_return": bh["total_return"], "sharpe": bh["sharpe"],
