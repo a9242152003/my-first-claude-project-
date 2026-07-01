@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# 回測產出(每次執行會重生)
+swingbt_report.md
